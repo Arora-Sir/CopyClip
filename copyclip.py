@@ -257,10 +257,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="CopyClip clipboard sync daemon")
     ap.add_argument("--config", default=os.path.join(HERE, "config.json"))
     ap.add_argument("--status", action="store_true", help="one-shot connectivity check")
+    ap.add_argument("--log-level", default=None,
+                    help="override config log_level (DEBUG shows per-frame routing)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    setup_logging(cfg["log_level"])
+    setup_logging(args.log_level or cfg["log_level"])
 
     if args.status:
         return cmd_status(cfg)

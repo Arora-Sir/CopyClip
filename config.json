@@ -1,24 +1,43 @@
 {
-  "_transport": "adb = Tier 1 (tested, needs re-arm after phone reboot). tcp = Tier 2 (Termux+Shizuku, survives reboot, see termux/setup_termux.md)",
-  "transport": "adb",
+  "_devices": "Order matters within a domain: the first writable member is preferred as representative.",
+  "devices": [
+    {
+      "name": "phone",
+      "transport": "adb",
+      "device": "100.64.0.11:5555",
+      "enabled": true
+    },
+    {
+      "name": "tab",
+      "transport": "adb",
+      "device": "100.64.0.12:5555",
+      "enabled": true
+    }
+  ],
 
-  "device": "100.64.0.11:5555",
+  "_domains": "Devices that already mirror each other by themselves. CopyClip writes to ONE member and lets Samsung Continuity distribute internally; it never syncs phone to tab itself. grace_s is how long Continuity gets to propagate before a probe counts as missed.",
+  "domains": [
+    {
+      "name": "samsung",
+      "members": ["phone", "tab"],
+      "grace_s": 8.0,
+      "fail_threshold": 3
+    }
+  ],
+
   "adb": "adb",
   "dex": "bin/clipbridge.dex",
-
-  "tcp_host": "100.64.0.11",
-  "tcp_port": 8385,
   "key_file": "copyclip.key",
+  "state_dir": "state",
 
   "max_chars": 800000,
-
-  "sync_laptop_to_phone": true,
-  "sync_phone_to_laptop": true,
-
-  "adopt_phone_clip_on_connect": false,
-
   "denylist_regex": [],
+  "allow_non_text": false,
 
+  "_adopt_on_connect": "false keeps a reconnect from overwriting what you just copied on the laptop with the device's older clip.",
+  "adopt_on_connect": false,
+
+  "dedup_ttl_s": 90.0,
   "reconnect_min_s": 1.0,
   "reconnect_max_s": 30.0,
   "idle_ping_s": 60.0,

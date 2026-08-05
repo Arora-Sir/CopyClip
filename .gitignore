@@ -29,6 +29,10 @@ graphify-out/
 logs/
 *.log
 
+# Durable outbox: pending clipboard writes waiting for a device to come back.
+# Machine-local state, and it can contain whatever you last copied.
+state/
+
 # --- python --------------------------------------------------------------
 __pycache__/
 *.py[cod]

@@ -30,14 +30,18 @@ class ClipPayload:
 
     @property
     def sha256(self) -> str:
-        """Content identity.
+        """Content identity: SHA-256 of the raw bytes.
 
-        Identity is the content hash and never the clip label: Samsung rewrites labels
-        when Continuity relays a clip (observed: our write reappears on the tablet tagged
-        `mcf_continuity;device_name=S24_Ultra`), so a label-based identity would treat the
-        same clip as two different ones and loop forever.
+        Identity is the content hash and never the clip label. Samsung rewrites labels
+        when Continuity relays a clip (observed: our own write reappeared on the tablet
+        tagged `mcf_continuity;device_name=S24_Ultra`), so a label-based identity would
+        treat one clip as two and loop forever.
+
+        Hashes the bytes alone, deliberately excluding the MIME type, so that ClipBridge
+        can compute the identical value on-device from the clipboard text without having
+        to agree on a composite hashing scheme.
         """
-        return hashlib.sha256(self.mime.encode("utf-8") + b"\0" + self.data).hexdigest()
+        return hashlib.sha256(self.data).hexdigest()
 
     @property
     def short(self) -> str:
@@ -104,6 +108,28 @@ class ClipPayload:
     def __repr__(self) -> str:
         return (f"ClipPayload({self.mime}, {self.size}B, from={self.origin}, "
                 f"sha={self.short})")
+
+
+@dataclass(frozen=True)
+class ClipDescriptor:
+    """Metadata about a clip, without the body.
+
+    Devices announce changes with this instead of shipping the payload. It is what keeps
+    Samsung's mirroring from doubling our traffic: when the tablet echoes a clip we
+    already routed, we recognise the hash and never pull the body. The body is fetched
+    only for clips that are genuinely new, and only from the device that reported first.
+    """
+
+    node: str
+    mime: str
+    sha256: str
+    ts: int = 0
+    sensitive: bool = False
+    char_len: int = 0
+
+    @property
+    def short(self) -> str:
+        return self.sha256[:12]
 
 
 class WriteResult:

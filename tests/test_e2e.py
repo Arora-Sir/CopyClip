@@ -1,8 +1,11 @@
-"""End-to-end test: run the real daemon and sync in both directions.
+"""End-to-end test for the laptop-to-phone path.
 
 Exercises the whole stack (Windows clipboard -> daemon -> adb -> ClipBridge -> Android
 clipboard and back), not just the transport. Requires the phone to be UNLOCKED, because
 Android denies clipboard access while the keyguard is up.
+
+Kept alongside test_three_device.py because it still runs when the tablet is unavailable,
+and it isolates a phone-only failure from a Samsung Continuity failure.
 
     python tests\\test_e2e.py
 """
@@ -24,7 +27,12 @@ sys.path.insert(0, ROOT)
 import winclip  # noqa: E402
 
 CFG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
-DEV = CFG["device"]
+
+# Resolve the phone from the device list. Falls back to the v1 flat key so an older
+# config still runs this suite.
+_enabled = [d for d in CFG.get("devices", []) if d.get("enabled", True)]
+_phone = next((d for d in _enabled if d["name"] == "phone"), _enabled[0] if _enabled else None)
+DEV = _phone["device"] if _phone else CFG["device"]
 ONESHOT = ("CLASSPATH=/data/local/tmp/clipbridge.dex app_process / "
            "me.mohit.copyclip.ClipBridge")
 

@@ -36,6 +36,7 @@ graphify-out
 # Runtime noise
 logs
 *.log
+state
 
 # Never graph the shared HMAC key
 copyclip.key

@@ -62,8 +62,14 @@ class RecentClips:
             return False
 
     def should_deliver(self, sha: str, node: str) -> bool:
-        """False if `node` already holds this clip, so we never send it back."""
+        """False if `node` already holds this clip, so we never send it back.
+
+        Prunes first. In the normal flow observe() has already pruned, but relying on
+        that would make this method silently honour the TTL only when called in the right
+        order, which is exactly the kind of hidden coupling that breaks later.
+        """
         with self._lock:
+            self._prune(time.time())
             entry = self._entries.get(sha)
             if entry is None:
                 return True

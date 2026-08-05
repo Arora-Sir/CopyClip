@@ -34,15 +34,23 @@ import java.util.List;
  * Wire protocol (stdio, line oriented, base64 payloads so newlines and Unicode survive intact):
  *
  *   out: READY <sdk>
+ *        DESC <mime> <sensitive:0|1> <timestamp> <sha256> <charlen>
  *        CLIP <mime> <sensitive:0|1> <base64-utf8>
  *        SKIP <mime> <reason>
+ *        LOCK <0|1>
  *        ACK <verb>
+ *        DEFER <verb> <reason>
  *        PONG
  *        ERR <message>
  *   in:  SET <base64-utf8>
- *        GET
+ *        GET          (send the body)
+ *        DESC         (send metadata only)
  *        PING
  *        QUIT
+ *
+ * The poll loop announces changes with DESC, never CLIP. The laptop asks for the body
+ * with GET only when it does not already recognise the hash, which stops Samsung's
+ * phone-to-tablet mirroring from putting every clip on the wire twice.
  */
 public final class ClipBridge {
 
@@ -91,6 +99,9 @@ public final class ClipBridge {
             switch (mode) {
                 case "get":
                     emitCurrentClip(true);
+                    break;
+                case "desc":
+                    emitDesc();
                     break;
                 case "set":
                     if (args.length < 2) {
@@ -287,6 +298,41 @@ public final class ClipBridge {
         return desc.getMimeType(0);
     }
 
+    /**
+     * Announce the current clip as metadata only: mime, sensitivity, timestamp, content
+     * hash and length. No payload.
+     *
+     * This is what the poll loop emits on every change. With the phone and tablet inside
+     * Samsung's sync domain, one copy surfaces on both of them, so shipping the body from
+     * each would send a 93 KB clip across the wire twice for a single copy. The laptop
+     * recognises an already-known hash and never asks for the body; it only issues GET for
+     * a clip it has not seen, and only to whichever device reported it first.
+     */
+    private static void emitDesc() throws Exception {
+        ClipDescription desc = getDescription();
+        String mime = mimeOf(desc);
+
+        if (isSensitive(desc)) {
+            emit("SKIP " + mime + " sensitive");
+            return;
+        }
+        ClipData clip = getClip();
+        if (clip == null || clip.getItemCount() == 0) {
+            return;
+        }
+        CharSequence cs = clip.getItemAt(0).getText();
+        if (cs == null) {
+            return;
+        }
+        String text = cs.toString();
+        String hash = sha256(text);
+        if (hash.equals(suppressHash)) {
+            return; // our own write coming back around
+        }
+        emit("DESC " + mime + " 0 " + (desc == null ? 0L : desc.getTimestamp())
+                + " " + hash + " " + text.length());
+    }
+
     /** Returns the sha256 of what was emitted, or null when nothing was emitted. */
     private static String emitCurrentClip(boolean force) throws Exception {
         ClipDescription desc = getDescription();
@@ -338,7 +384,6 @@ public final class ClipBridge {
         stdin.start();
 
         long lastStamp = -1L;
-        String lastHash = null;
         boolean lastLocked = !isLocked(); // force an initial LOCK report
 
         while (true) {
@@ -361,14 +406,11 @@ public final class ClipBridge {
 
                 ClipDescription desc = getDescription();
                 // Polling the description is cheap: it never transfers clip content. Only a
-                // changed timestamp justifies pulling the full (potentially 100 KB) payload.
+                // changed timestamp justifies looking at the clip at all.
                 long stamp = desc == null ? 0L : desc.getTimestamp();
                 if (stamp != lastStamp) {
                     lastStamp = stamp;
-                    String hash = emitCurrentClip(false);
-                    if (hash != null && !hash.equals(lastHash)) {
-                        lastHash = hash;
-                    }
+                    emitDesc();
                 }
             } catch (Throwable t) {
                 emit("ERR poll: " + describe(t));
@@ -396,6 +438,9 @@ public final class ClipBridge {
                             break;
                         case "GET":
                             emitCurrentClip(true);
+                            break;
+                        case "DESC":
+                            emitDesc();
                             break;
                         case "PING":
                             emit("PONG");

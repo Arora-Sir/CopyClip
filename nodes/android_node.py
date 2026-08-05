@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Callable
 
-from core.models import ClipPayload, WriteResult
+from core.models import ClipDescriptor, ClipPayload, WriteResult
 from transports import TransportError
 
 from .base import ClipboardNode
@@ -180,6 +180,22 @@ class AndroidNode(ClipboardNode):
                 return
             self._emit(payload)
 
+        elif verb == "DESC":
+            # "DESC <mime> <sens> <ts> <sha> <charlen>"
+            parts = line.split(" ")
+            if len(parts) < 5:
+                log.warning("[%s] malformed DESC", self.name)
+                return
+            try:
+                descriptor = ClipDescriptor(
+                    node=self.name, mime=parts[1], sensitive=parts[2] == "1",
+                    ts=int(parts[3]), sha256=parts[4],
+                    char_len=int(parts[5]) if len(parts) > 5 else 0)
+            except ValueError:
+                log.warning("[%s] unparseable DESC: %s", self.name, line[:80])
+                return
+            self._emit_desc(descriptor)
+
         elif verb == "LOCK":
             locked = rest.strip() == "1"
             if locked != self._locked:
@@ -202,7 +218,7 @@ class AndroidNode(ClipboardNode):
         elif verb == "ERR":
             log.warning("[%s] bridge error: %s", self.name, rest.strip())
 
-        elif verb in ("ACK", "PONG", "READY", "DESC"):
+        elif verb in ("ACK", "PONG", "READY"):
             log.debug("[%s] %s", self.name, line)
 
         else:

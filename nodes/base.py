@@ -12,11 +12,12 @@ import abc
 import logging
 from typing import Callable
 
-from core.models import ClipPayload
+from core.models import ClipDescriptor, ClipPayload
 
 log = logging.getLogger("copyclip.node")
 
 ClipCallback = Callable[[ClipPayload], None]
+DescCallback = Callable[[ClipDescriptor], None]
 
 
 class ClipboardNode(abc.ABC):
@@ -25,12 +26,14 @@ class ClipboardNode(abc.ABC):
     def __init__(self, name: str) -> None:
         self.name = name
         self._on_clip: ClipCallback | None = None
+        self._on_desc: DescCallback | None = None
 
     # -- wiring ------------------------------------------------------------
 
-    def subscribe(self, callback: ClipCallback) -> None:
-        """Register the hub's handler for clips observed on this node."""
+    def subscribe(self, callback: ClipCallback, on_desc: DescCallback | None = None) -> None:
+        """Register the hub's handlers for clips and change announcements."""
         self._on_clip = callback
+        self._on_desc = on_desc
 
     def _emit(self, payload: ClipPayload) -> None:
         if self._on_clip is None:
@@ -39,6 +42,14 @@ class ClipboardNode(abc.ABC):
             self._on_clip(payload)
         except Exception:
             log.exception("[%s] clip callback failed", self.name)
+
+    def _emit_desc(self, descriptor: ClipDescriptor) -> None:
+        if self._on_desc is None:
+            return
+        try:
+            self._on_desc(descriptor)
+        except Exception:
+            log.exception("[%s] descriptor callback failed", self.name)
 
     # -- lifecycle ---------------------------------------------------------
 

@@ -26,7 +26,7 @@ from domains.sync_domain import SyncDomain
 from nodes.base import ClipboardNode
 
 from .dedup import RecentClips
-from .models import ClipPayload, WriteResult
+from .models import ClipDescriptor, ClipPayload, WriteResult
 from .outbox import Outbox
 from .policy import Policy
 
@@ -66,7 +66,7 @@ class Hub:
 
     def start(self) -> None:
         for node in self.nodes.values():
-            node.subscribe(self.on_clip)
+            node.subscribe(self.on_clip, self.on_descriptor)
             node.start()
         self._ticker = threading.Thread(target=self._tick_loop, name="copyclip-tick",
                                         daemon=True)
@@ -94,6 +94,47 @@ class Hub:
                 log.exception("outbox drain failed")
 
     # -- inbound -----------------------------------------------------------
+
+    def on_descriptor(self, desc: ClipDescriptor) -> None:
+        """A device announced a clipboard change, metadata only.
+
+        This is the redundancy filter. When Samsung mirrors a clip we already know about,
+        its hash is familiar and we stop right here without ever pulling the body. Only a
+        genuinely unknown hash costs a fetch, and only from the device that reported it
+        first, so one copy moves one body no matter how many devices echo it.
+        """
+        with self._route_lock:
+            known = self.dedup.known(desc.sha256)
+
+            # A familiar hash arriving on a second device is precisely the evidence that
+            # Samsung Continuity is alive, so feed the health check before returning.
+            for d in self.domains:
+                d.note_observed(desc.sha256, desc.node)
+
+            if known:
+                self.dedup.mark_delivered(desc.sha256, desc.node)
+                log.debug("[%s] announced %s, already known; body not fetched",
+                          desc.node, desc.short)
+                return
+
+            if desc.sensitive:
+                self.stats["skipped"] += 1
+                log.info("skip clip from %s: flagged sensitive by the source app", desc.node)
+                return
+
+            if desc.char_len > self.policy.max_chars:
+                # Reject on the announcement, before paying to transfer it at all.
+                self.stats["skipped"] += 1
+                log.info("skip clip from %s: too large (%d > %d), body not fetched",
+                         desc.node, desc.char_len, self.policy.max_chars)
+                return
+
+            node = self.nodes.get(desc.node)
+
+        if node is not None:
+            log.debug("[%s] announced new %s (%d chars); fetching body",
+                      desc.node, desc.short, desc.char_len)
+            node.request_refresh()
 
     def on_clip(self, payload: ClipPayload) -> None:
         """A clip was observed on payload.origin."""
