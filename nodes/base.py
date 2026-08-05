@@ -18,6 +18,7 @@ log = logging.getLogger("copyclip.node")
 
 ClipCallback = Callable[[ClipPayload], None]
 DescCallback = Callable[[ClipDescriptor], None]
+StampCallback = Callable[[str, str], None]   # (node_name, timestamp)
 
 
 class ClipboardNode(abc.ABC):
@@ -27,13 +28,16 @@ class ClipboardNode(abc.ABC):
         self.name = name
         self._on_clip: ClipCallback | None = None
         self._on_desc: DescCallback | None = None
+        self._on_stamp: StampCallback | None = None
 
     # -- wiring ------------------------------------------------------------
 
-    def subscribe(self, callback: ClipCallback, on_desc: DescCallback | None = None) -> None:
+    def subscribe(self, callback: ClipCallback, on_desc: DescCallback | None = None,
+                  on_stamp: StampCallback | None = None) -> None:
         """Register the hub's handlers for clips and change announcements."""
         self._on_clip = callback
         self._on_desc = on_desc
+        self._on_stamp = on_stamp
 
     def _emit(self, payload: ClipPayload) -> None:
         if self._on_clip is None:
@@ -50,6 +54,15 @@ class ClipboardNode(abc.ABC):
             self._on_desc(descriptor)
         except Exception:
             log.exception("[%s] descriptor callback failed", self.name)
+
+    def _emit_stamp(self, stamp: str) -> None:
+        """A change happened here but content was not read, so there is no hash."""
+        if self._on_stamp is None:
+            return
+        try:
+            self._on_stamp(self.name, stamp)
+        except Exception:
+            log.exception("[%s] stamp callback failed", self.name)
 
     # -- lifecycle ---------------------------------------------------------
 

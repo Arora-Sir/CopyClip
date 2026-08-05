@@ -66,7 +66,7 @@ class Hub:
 
     def start(self) -> None:
         for node in self.nodes.values():
-            node.subscribe(self.on_clip, self.on_descriptor)
+            node.subscribe(self.on_clip, self.on_descriptor, self.on_stamp)
             node.start()
         self._ticker = threading.Thread(target=self._tick_loop, name="copyclip-tick",
                                         daemon=True)
@@ -86,6 +86,10 @@ class Hub:
             for domain in self.domains:
                 try:
                     domain.tick()
+                    # Re-assert read modes every tick. It is a no-op unless the elected
+                    # representative or Continuity health actually changed, and it also
+                    # re-applies the mode to a device that just reconnected.
+                    domain.apply_modes()
                 except Exception:
                     log.exception("domain tick failed")
             try:
@@ -94,6 +98,12 @@ class Hub:
                 log.exception("outbox drain failed")
 
     # -- inbound -----------------------------------------------------------
+
+    def on_stamp(self, node_name: str, stamp: str) -> None:
+        """A device saw a change but deliberately did not read the content."""
+        for d in self.domains:
+            d.note_stamp(node_name)
+        log.debug("[%s] change announced without a content read (stamp %s)", node_name, stamp)
 
     def on_descriptor(self, desc: ClipDescriptor) -> None:
         """A device announced a clipboard change, metadata only.
@@ -228,12 +238,18 @@ class Hub:
                      if result == WriteResult.DEFERRED else "")
             return True
 
-        if result == WriteResult.UNAVAILABLE:
+        if result in (WriteResult.UNAVAILABLE, WriteResult.FAILED):
+            # FAILED is queued too, not just UNAVAILABLE. A transient local failure (a
+            # clipboard the OS briefly would not hand over, say) used to be logged and the
+            # clip discarded outright, which is how a 93 KB clip from the tablet was lost.
+            # The outbox tick retries it.
             self.outbox.put(f"node:{node.name}", payload)
             self.stats["queued"] += 1
+            if result == WriteResult.FAILED:
+                log.warning("%s -> %s failed; queued for retry", payload.origin, node.name)
             return False
 
-        log.warning("%s -> %s failed (%s)", payload.origin, node.name, result)
+        log.warning("%s -> %s rejected (%s)", payload.origin, node.name, result)
         return False
 
     # -- recovery ----------------------------------------------------------

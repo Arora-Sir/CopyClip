@@ -125,6 +125,42 @@ class SyncDomain:
                 return
         log.debug("[%s] Continuity confirmed via %s", self.name, node_name)
 
+    def note_stamp(self, node_name: str) -> None:
+        """A member reported a change without reading content, so there is no hash.
+
+        Treated as propagation evidence when it comes from a member other than the one we
+        wrote to and lands inside the grace window. Less precise than a hash match, but a
+        standby has no other reason to change moments after we wrote to its sibling, and it
+        is the price of not reading content there (which would raise a toast on every copy).
+        """
+        with self._lock:
+            probe = self._probe
+            if probe is None or node_name == probe.written_to:
+                return
+            if time.time() - probe.at > self.grace_s:
+                return
+            self._probe = None
+            self._consecutive_misses = 0
+            if not self._healthy:
+                self._healthy = True
+                log.info("[%s] Continuity propagation confirmed; back to single-target writes",
+                         self.name)
+
+    def apply_modes(self) -> None:
+        """Give exactly one member the job of reading clip content.
+
+        Healthy: the representative reads, everyone else announces timestamps only.
+        Degraded: everyone reads, because nothing is relaying on our behalf and a copy made
+        on a standby would otherwise never be seen.
+        """
+        degraded = not self.healthy
+        rep = self.representative()
+        for m in self.members:
+            if not m.available or not hasattr(m, "set_mode"):
+                continue
+            wants_full = degraded or (rep is not None and m.name == rep.name)
+            m.set_mode("full" if wants_full else "stamp")
+
     def tick(self) -> None:
         """Expire an unconfirmed probe. Call periodically from the hub."""
         with self._lock:

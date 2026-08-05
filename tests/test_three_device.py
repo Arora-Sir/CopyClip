@@ -180,8 +180,27 @@ def main() -> int:
                   and dev_get("tab") == big)
         check("content settles across all three", stable)
 
+        # --- 8. clipboard read minimisation (BUG-001) ------------------------
+        # Reading clip *content* on a device raises Android's "Shell pasted from your
+        # clipboard" toast. These two assertions are the real fix, expressed as behaviour:
+        # our own writes must never be read back, and a genuine copy must be read exactly
+        # once across the whole Samsung domain rather than once per device.
+        m = len(lines)
+        winclip.write_text(f"CopyClip-READS-L-{stamp}")
+        time.sleep(CONTINUITY_WAIT)
+        fetches = sum(1 for ln in since(m) if "fetching body" in ln)
+        check("laptop copy triggers ZERO device content reads", fetches == 0,
+              f"{fetches} content fetch(es); each one would raise a Shell toast")
+
+        m = len(lines)
+        dev_set("phone", f"CopyClip-READS-P-{stamp}")
+        time.sleep(CONTINUITY_WAIT)
+        fetches = sum(1 for ln in since(m) if "fetching body" in ln)
+        check("device copy triggers exactly ONE content read domain-wide", fetches == 1,
+              f"{fetches} content fetch(es); was 2 before the standby stopped reading")
+
         total = sum(writes_to(lines, x) for x in ("laptop", "phone", "tab"))
-        check("no runaway transfers", total <= 12, f"{total} deliveries logged")
+        check("no runaway transfers", total <= 14, f"{total} deliveries logged")
 
     finally:
         proc.terminate()

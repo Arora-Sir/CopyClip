@@ -35,6 +35,7 @@ import java.util.List;
  *
  *   out: READY <sdk>
  *        DESC <mime> <sensitive:0|1> <timestamp> <sha256> <charlen>
+ *        STAMP <timestamp>          (change seen, content deliberately not read)
  *        CLIP <mime> <sensitive:0|1> <base64-utf8>
  *        SKIP <mime> <reason>
  *        LOCK <0|1>
@@ -45,12 +46,18 @@ import java.util.List;
  *   in:  SET <base64-utf8>
  *        GET          (send the body)
  *        DESC         (send metadata only)
+ *        MODE stamp   (announce timestamps only, never read content)
+ *        MODE full    (read content to produce DESC hashes)
  *        PING
  *        QUIT
  *
- * The poll loop announces changes with DESC, never CLIP. The laptop asks for the body
- * with GET only when it does not already recognise the hash, which stops Samsung's
+ * The poll loop announces changes with DESC, never CLIP. The laptop asks for the body with
+ * GET only when it does not already recognise the hash, which stops Samsung's
  * phone-to-tablet mirroring from putting every clip on the wire twice.
+ *
+ * Reading clip *content* raises Android's "Shell pasted from your clipboard" toast, so
+ * content reads are minimised aggressively: never for our own writes, and never at all on
+ * a standby device whose Samsung sibling is already being read.
  */
 public final class ClipBridge {
 
@@ -75,6 +82,27 @@ public final class ClipBridge {
      * replayed the moment the device unlocks, rather than being lost without a trace.
      */
     private static volatile String pendingSet;
+
+    /**
+     * Timestamp of the clip *we* last wrote.
+     *
+     * Reading clip content raises Android's "Shell pasted from your clipboard" toast, so
+     * reading back our own write is both pointless and noisy: we already know the content.
+     * The poll loop compares against this and skips the content read entirely when the
+     * change was our own. `getPrimaryClipDescription` does not raise the toast, which is
+     * what makes this check free.
+     */
+    private static volatile long ownWriteStamp = Long.MIN_VALUE;
+
+    /**
+     * When true this device announces changes as a bare timestamp and never reads content.
+     *
+     * Used for the standby member of a Samsung sync domain. Both devices mirror each other,
+     * so only one of them needs to read a clip; the standby reading too would double both
+     * the toasts and the work for a single copy. A copy made here still reaches the laptop,
+     * because Samsung relays it to the representative where it is read once.
+     */
+    private static volatile boolean stampOnly = false;
 
     /**
      * Hash of content we just wrote on behalf of the laptop. The write bumps the clipboard
@@ -256,11 +284,14 @@ public final class ClipBridge {
         suppressHash = sha256(text);
         call(clipboard, "setPrimaryClip", ClipData.newPlainText("CopyClip", text));
 
-        if (getDescription() == null) {
+        ClipDescription after = getDescription();
+        if (after == null) {
             pendingSet = b64;
             emit("DEFER set discarded");
             return;
         }
+        // Remember the stamp our own write produced so the poll loop does not read it back.
+        ownWriteStamp = after.getTimestamp();
         pendingSet = null;
         emit("ACK set");
     }
@@ -405,12 +436,22 @@ public final class ClipBridge {
                 }
 
                 ClipDescription desc = getDescription();
-                // Polling the description is cheap: it never transfers clip content. Only a
-                // changed timestamp justifies looking at the clip at all.
+                // Polling the description is cheap: it never transfers clip content and
+                // never raises a read notification. Only a changed timestamp justifies
+                // looking at the clip at all.
                 long stamp = desc == null ? 0L : desc.getTimestamp();
                 if (stamp != lastStamp) {
                     lastStamp = stamp;
-                    emitDesc();
+                    if (stamp == ownWriteStamp) {
+                        // Our own write echoing back. Reading it would tell us nothing we
+                        // do not already know, and would raise a "Shell pasted from your
+                        // clipboard" toast for a clip the user never copied.
+                        emit("STAMP " + stamp);
+                    } else if (stampOnly) {
+                        emit("STAMP " + stamp);
+                    } else {
+                        emitDesc();
+                    }
                 }
             } catch (Throwable t) {
                 emit("ERR poll: " + describe(t));
@@ -441,6 +482,12 @@ public final class ClipBridge {
                             break;
                         case "DESC":
                             emitDesc();
+                            break;
+                        case "MODE":
+                            // "MODE stamp" for a standby domain member, "MODE full" for the
+                            // one device that actually reads clip content.
+                            stampOnly = rest.equalsIgnoreCase("stamp");
+                            emit("ACK mode " + (stampOnly ? "stamp" : "full"));
                             break;
                         case "PING":
                             emit("PONG");

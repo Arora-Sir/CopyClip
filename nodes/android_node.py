@@ -49,6 +49,7 @@ class AndroidNode(ClipboardNode):
         self._locked = False
         self._connected = False
         self._lock = threading.Lock()
+        self._mode = "full"
         self.last_error: str | None = None
 
     # -- state -------------------------------------------------------------
@@ -107,6 +108,9 @@ class AndroidNode(ClipboardNode):
             with self._lock:
                 self._transport = transport
                 self._connected = True
+                # A fresh ClipBridge always starts in 'full'; mirror that so the domain's
+                # next apply_modes() actually re-sends the intended mode.
+                self._mode = "full"
             log.info("[%s] connected", self.name)
             if self._on_connect is not None:
                 try:
@@ -196,6 +200,13 @@ class AndroidNode(ClipboardNode):
                 return
             self._emit_desc(descriptor)
 
+        elif verb == "STAMP":
+            # The clipboard changed but content was deliberately not read (standby mode, or
+            # the change was our own write). Carries no hash, so it is only evidence that
+            # *something* happened here, which is exactly what the Continuity health check
+            # needs.
+            self._emit_stamp(rest.strip())
+
         elif verb == "LOCK":
             locked = rest.strip() == "1"
             if locked != self._locked:
@@ -251,6 +262,35 @@ class AndroidNode(ClipboardNode):
             transport.send_line("GET")
         except TransportError:
             pass
+
+    def set_mode(self, mode: str) -> None:
+        """Switch this device between 'full' (reads clip content) and 'stamp' (never does).
+
+        Only one member of a Samsung sync domain needs to read a clip, because the devices
+        mirror each other. Reading on both doubles the work and, with clipboard access
+        alerts on, doubles the toasts for a single copy.
+        """
+        if mode not in ("full", "stamp"):
+            raise ValueError(f"bad mode {mode!r}")
+        if self._mode == mode:
+            return
+        with self._lock:
+            transport = self._transport
+        if transport is None:
+            # Do NOT record the mode while disconnected. A fresh ClipBridge always starts
+            # in 'full', so remembering an unsent 'stamp' here would make the next
+            # apply_modes() a no-op and silently leave the device reading content forever.
+            return
+        try:
+            transport.send_line(f"MODE {mode}")
+            self._mode = mode
+            log.info("[%s] read mode -> %s", self.name, mode)
+        except TransportError:
+            pass
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     def request_desc(self) -> None:
         """Ask for metadata only. Used by the Continuity health check so a probe never

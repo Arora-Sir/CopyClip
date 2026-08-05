@@ -222,10 +222,76 @@ def test_domain():
           solo._consecutive_misses == 1)
 
 
+# --------------------------------------------------------------- winclip
+
+def test_winclip_concurrency():
+    """BUG-002: concurrent clipboard access must not raise.
+
+    The daemon writes from a device node's pump thread while the watcher thread reads on
+    WM_CLIPBOARDUPDATE. The Windows clipboard is a single system-wide exclusive resource,
+    so before the process-wide lock and whole-operation retry, a mid-sequence failure
+    (EmptyClipboard returning ERROR_CLIPBOARD_NOT_OPEN) aborted the write and the clip was
+    silently lost.
+
+    Saves and restores whatever is on the clipboard so running the suite is not destructive.
+    """
+    import threading as _t
+    import winclip
+
+    try:
+        original = winclip.read_text()
+    except Exception:
+        original = None
+
+    errors: list[Exception] = []
+    written: list[str] = []
+
+    def writer(tag: str, n: int) -> None:
+        for i in range(n):
+            try:
+                value = f"{tag}-{i}-" + "x" * 500
+                winclip.write_text(value)
+                written.append(value)
+            except Exception as exc:
+                errors.append(exc)
+
+    def reader(n: int) -> None:
+        for _ in range(n):
+            try:
+                winclip.read_text()
+            except winclip.ClipboardBusy:
+                pass                      # legitimate: another process held it
+            except Exception as exc:
+                errors.append(exc)
+
+    threads = [_t.Thread(target=writer, args=("A", 15)),
+               _t.Thread(target=writer, args=("B", 15)),
+               _t.Thread(target=reader, args=(30,))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    check("concurrent clipboard access raises nothing",
+          not errors, f"{len(errors)} error(s): {errors[:2]}")
+    check("all concurrent writes completed", len(written) == 30, f"{len(written)}/30")
+
+    final = winclip.read_text()
+    ok = final in written
+    check("clipboard left in a consistent state", ok,
+          "" if ok else f"final value is not any of the writes: {str(final)[:40]!r}")
+
+    if original is not None:
+        try:
+            winclip.write_text(original)
+        except Exception:
+            pass
+
+
 def main() -> int:
     for name, fn in [("payload", test_payload), ("dedup", test_dedup),
                      ("outbox", test_outbox), ("policy", test_policy),
-                     ("domain", test_domain)]:
+                     ("domain", test_domain), ("winclip", test_winclip_concurrency)]:
         print(f"{name}:")
         fn()
     print()

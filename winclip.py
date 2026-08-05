@@ -100,6 +100,27 @@ class ClipboardBusy(RuntimeError):
     """Another process held the clipboard for the whole retry window."""
 
 
+ERROR_ACCESS_DENIED = 5
+ERROR_CLIPBOARD_NOT_OPEN = 1418
+
+# Errors that mean "someone else was mid-operation", i.e. worth retrying rather than
+# failing the whole write. 1418 in particular was observed in the wild: EmptyClipboard
+# reported ERROR_CLIPBOARD_NOT_OPEN despite OpenClipboard having just succeeded.
+_TRANSIENT = {0, ERROR_ACCESS_DENIED, ERROR_CLIPBOARD_NOT_OPEN}
+
+# The Windows clipboard is a single system-wide exclusive resource. Our own watcher thread
+# (reading on WM_CLIPBOARDUPDATE) and a device node's pump thread (writing) will otherwise
+# contend for it constantly and lose races against each other for no reason. Serialising
+# our own access removes that entire class of failure; it does nothing about other
+# processes, which is what the retry loops are for.
+_ACCESS_LOCK = threading.RLock()
+
+# Set by ClipboardWatcher once its message-only window exists. Owning the clipboard with a
+# real HWND is the documented-correct form: with a NULL owner, EmptyClipboard sets the
+# clipboard owner to NULL, which MSDN notes can make subsequent calls fail.
+_owner_hwnd = None
+
+
 class _Opened:
     """RAII clipboard lock.
 
@@ -111,19 +132,31 @@ class _Opened:
     def __init__(self, attempts: int = 12, delay: float = 0.02) -> None:
         self.attempts = attempts
         self.delay = delay
+        self._held = False
 
     def __enter__(self) -> None:
-        for i in range(self.attempts):
-            if user32.OpenClipboard(None):
-                return
-            time.sleep(self.delay * (1 + i * 0.5))
+        _ACCESS_LOCK.acquire()
+        try:
+            for i in range(self.attempts):
+                if user32.OpenClipboard(_owner_hwnd):
+                    self._held = True
+                    return
+                time.sleep(self.delay * (1 + i * 0.5))
+        except BaseException:
+            _ACCESS_LOCK.release()
+            raise
+        _ACCESS_LOCK.release()
         raise ClipboardBusy(
             f"OpenClipboard failed after {self.attempts} attempts "
             f"(err={ctypes.get_last_error()})"
         )
 
     def __exit__(self, *exc: object) -> None:
-        user32.CloseClipboard()
+        try:
+            if self._held:
+                user32.CloseClipboard()
+        finally:
+            _ACCESS_LOCK.release()
 
 
 def sequence_number() -> int:
@@ -155,9 +188,8 @@ def read_text() -> str | None:
             kernel32.GlobalUnlock(handle)
 
 
-def write_text(text: str) -> None:
-    """Replace the clipboard with `text`."""
-    data = text.encode("utf-16-le") + b"\x00\x00"
+def _write_once(data: bytes) -> None:
+    """One open-empty-alloc-set-close cycle. Raises on any failure."""
     with _Opened():
         if not user32.EmptyClipboard():
             raise OSError(f"EmptyClipboard failed (err={ctypes.get_last_error()})")
@@ -174,6 +206,33 @@ def write_text(text: str) -> None:
             # Ownership only transfers to the system on success; free it ourselves otherwise.
             kernel32.GlobalFree(handle)
             raise OSError(f"SetClipboardData failed (err={ctypes.get_last_error()})")
+
+
+def write_text(text: str, attempts: int = 4) -> None:
+    """Replace the clipboard with `text`.
+
+    Retries the **whole** sequence, not just the open. Previously only OpenClipboard was
+    retried, so a mid-sequence failure (observed: EmptyClipboard returning
+    ERROR_CLIPBOARD_NOT_OPEN after a successful open) abandoned the write outright and the
+    clip was lost.
+    """
+    data = text.encode("utf-16-le") + b"\x00\x00"
+    last: Exception | None = None
+
+    for i in range(attempts):
+        try:
+            _write_once(data)
+            return
+        except (OSError, ClipboardBusy) as exc:
+            last = exc
+            err = getattr(exc, "winerror", None) or ctypes.get_last_error()
+            if isinstance(exc, OSError) and err not in _TRANSIENT:
+                raise
+            log.warning("clipboard write attempt %d/%d failed (%s); retrying",
+                        i + 1, attempts, exc)
+            time.sleep(0.05 * (i + 1))
+
+    raise OSError(f"clipboard write failed after {attempts} attempts: {last}")
 
 
 class ClipboardWatcher:
@@ -211,6 +270,8 @@ class ClipboardWatcher:
             self._run_poller()
 
     def _run_listener(self) -> None:
+        global _owner_hwnd
+
         def wndproc(hwnd, msg, wparam, lparam):
             if msg == WM_CLIPBOARDUPDATE:
                 try:
@@ -236,6 +297,9 @@ class ClipboardWatcher:
                                             HWND_MESSAGE, None, hinst, None)
         if not self._hwnd:
             raise OSError(f"CreateWindowExW failed (err={ctypes.get_last_error()})")
+
+        # Publish it as the clipboard owner for every open from now on.
+        _owner_hwnd = self._hwnd
         if not user32.AddClipboardFormatListener(self._hwnd):
             raise OSError(f"AddClipboardFormatListener failed (err={ctypes.get_last_error()})")
 
@@ -249,6 +313,8 @@ class ClipboardWatcher:
             user32.DispatchMessageW(ctypes.byref(msg))
 
         user32.RemoveClipboardFormatListener(self._hwnd)
+        if _owner_hwnd == self._hwnd:
+            _owner_hwnd = None
 
     def _run_poller(self) -> None:
         last = sequence_number()
