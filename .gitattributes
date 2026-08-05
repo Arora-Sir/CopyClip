@@ -1,0 +1,19 @@
+# Normalise to LF in the repo, check out native on Windows.
+* text=auto
+
+# Windows script hosts are safest with CRLF. cmd.exe in particular can mis-parse
+# multi-line constructs in a .bat that has LF endings.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+*.vbs   text eol=crlf
+
+# Keep LF for everything that runs on Android or is read by Python.
+*.py    text eol=lf
+*.java  text eol=lf
+*.sh    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+
+# Build output, never diff it.
+*.dex   binary

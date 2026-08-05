@@ -1,0 +1,27 @@
+{
+  "_transport": "adb = Tier 1 (tested, needs re-arm after phone reboot). tcp = Tier 2 (Termux+Shizuku, survives reboot, see termux/setup_termux.md)",
+  "transport": "adb",
+
+  "device": "100.64.0.11:5555",
+  "adb": "adb",
+  "dex": "bin/clipbridge.dex",
+
+  "tcp_host": "100.64.0.11",
+  "tcp_port": 8385,
+  "key_file": "copyclip.key",
+
+  "max_chars": 800000,
+
+  "sync_laptop_to_phone": true,
+  "sync_phone_to_laptop": true,
+
+  "adopt_phone_clip_on_connect": false,
+
+  "denylist_regex": [],
+
+  "reconnect_min_s": 1.0,
+  "reconnect_max_s": 30.0,
+  "idle_ping_s": 60.0,
+
+  "log_level": "INFO"
+}
