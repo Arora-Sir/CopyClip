@@ -222,6 +222,27 @@ def test_domain():
           solo._consecutive_misses == 1)
 
 
+# ------------------------------------------------------------- hub stamp
+def test_hub_stamp_attribution():
+    from core.hub import Hub
+    laptop, phone, tab = FakeNode("laptop"), FakeNode("phone"), FakeNode("tab")
+    dom = SyncDomain("samsung", [phone, tab])
+    pol = Policy()
+    tmp = tempfile.mkdtemp(prefix="copyclip-hubtest-")
+    try:
+        ob = Outbox(os.path.join(tmp, "outbox.json"))
+        hub = Hub(nodes=[laptop, phone, tab], domains=[dom], policy=pol, outbox=ob)
+        hub.on_stamp("tab", "100")
+        check("stamp records recent node", hub._last_stamp_node == "tab")
+
+        p = ClipPayload.from_text("hello from tab via phone", origin="phone")
+        hub.on_clip(p)
+        check("laptop received clip from phone", len(laptop.writes) == 1)
+        check("stamp cleared after correlation", hub._last_stamp_node is None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ------------------------------------------------------- single instance
 
 def test_single_instance():
@@ -334,7 +355,8 @@ def test_winclip_concurrency():
 def main() -> int:
     for name, fn in [("payload", test_payload), ("dedup", test_dedup),
                      ("outbox", test_outbox), ("policy", test_policy),
-                     ("domain", test_domain), ("single-instance", test_single_instance),
+                     ("domain", test_domain), ("hub-stamp", test_hub_stamp_attribution),
+                     ("single-instance", test_single_instance),
                      ("winclip", test_winclip_concurrency)]:
         print(f"{name}:")
         fn()

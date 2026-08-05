@@ -56,6 +56,8 @@ class Hub:
         # catch-up this is supposed to deliver.
         self._baseline_pending: set[str] = set()
         self._baselined: set[str] = set()
+        self._last_stamp_node: str | None = None
+        self._last_stamp_time: float = 0.0
         self.stats = {"observed": 0, "delivered": 0, "skipped": 0, "queued": 0}
 
     # -- topology ----------------------------------------------------------
@@ -105,6 +107,9 @@ class Hub:
 
     def on_stamp(self, node_name: str, stamp: str) -> None:
         """A device saw a change but deliberately did not read the content."""
+        with self._route_lock:
+            self._last_stamp_node = node_name
+            self._last_stamp_time = time.time()
         for d in self.domains:
             d.note_stamp(node_name)
         log.debug("[%s] change announced without a content read (stamp %s)", node_name, stamp)
@@ -187,18 +192,27 @@ class Hub:
                 log.info("skip clip from %s: %s", source, reason)
                 return
 
-            self._route(payload, source_domain=domain)
+            now = time.time()
+            if (self._last_stamp_node and self._last_stamp_node != source
+                    and (now - self._last_stamp_time <= 6.0)):
+                origin_display = f"{self._last_stamp_node} (via {source})"
+                self._last_stamp_node = None
+            else:
+                origin_display = source
+
+            self._route(payload, source_domain=domain, origin_display=origin_display)
 
     # -- outbound ----------------------------------------------------------
 
-    def _route(self, payload: ClipPayload, source_domain: SyncDomain | None) -> None:
+    def _route(self, payload: ClipPayload, source_domain: SyncDomain | None,
+               origin_display: str | None = None) -> None:
         source = payload.origin
 
         # Standalone nodes (the laptop) each get their own copy.
         for node in self._standalone_nodes():
             if node.name == source:
                 continue
-            self._deliver_to_node(node, payload)
+            self._deliver_to_node(node, payload, origin_display=origin_display)
 
         # Domains get exactly one write, unless Continuity is degraded.
         for domain in self.domains:
@@ -207,9 +221,10 @@ class Hub:
                 # is the redundancy the design exists to avoid.
                 log.debug("not writing to domain %s; clip originated inside it", domain.name)
                 continue
-            self._deliver_to_domain(domain, payload)
+            self._deliver_to_domain(domain, payload, origin_display=origin_display)
 
-    def _deliver_to_domain(self, domain: SyncDomain, payload: ClipPayload) -> None:
+    def _deliver_to_domain(self, domain: SyncDomain, payload: ClipPayload,
+                           origin_display: str | None = None) -> None:
         targets = domain.write_targets()
         if not targets:
             self.outbox.put(f"domain:{domain.name}", payload)
@@ -217,15 +232,17 @@ class Hub:
             return
         wrote_any = False
         for node in targets:
-            if self._deliver_to_node(node, payload):
+            if self._deliver_to_node(node, payload, origin_display=origin_display):
                 wrote_any = True
                 domain.note_write(payload.sha256, node)
         if not wrote_any:
             self.outbox.put(f"domain:{domain.name}", payload)
             self.stats["queued"] += 1
 
-    def _deliver_to_node(self, node: ClipboardNode, payload: ClipPayload) -> bool:
+    def _deliver_to_node(self, node: ClipboardNode, payload: ClipPayload,
+                         origin_display: str | None = None) -> bool:
         sha = payload.sha256
+        display = origin_display or payload.origin
         if not self.dedup.should_deliver(sha, node.name):
             log.debug("%s already holds %s", node.name, payload.short)
             return False
@@ -237,7 +254,7 @@ class Hub:
             # unlock, so re-sending later would double-apply.
             self.dedup.mark_delivered(sha, node.name)
             self.stats["delivered"] += 1
-            log.info("%s -> %s: %d chars%s", payload.origin, node.name, payload.char_len,
+            log.info("%s -> %s: %d chars%s", display, node.name, payload.char_len,
                      " (queued on device until unlock)"
                      if result == WriteResult.DEFERRED else "")
             return True
@@ -250,10 +267,10 @@ class Hub:
             self.outbox.put(f"node:{node.name}", payload)
             self.stats["queued"] += 1
             if result == WriteResult.FAILED:
-                log.warning("%s -> %s failed; queued for retry", payload.origin, node.name)
+                log.warning("%s -> %s failed; queued for retry", display, node.name)
             return False
 
-        log.warning("%s -> %s rejected (%s)", payload.origin, node.name, result)
+        log.warning("%s -> %s rejected (%s)", display, node.name, result)
         return False
 
     # -- recovery ----------------------------------------------------------
