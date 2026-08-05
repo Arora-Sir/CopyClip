@@ -77,7 +77,7 @@ def main() -> int:
     def reader():
         for line in proc.stdout:  # type: ignore[union-attr]
             lines.append(line.rstrip())
-            if "connected to" in line:
+            if "] connected" in line:
                 ready.set()
 
     threading.Thread(target=reader, daemon=True).start()

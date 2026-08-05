@@ -1,8 +1,10 @@
-r"""CopyClip: instant bidirectional clipboard sync between Windows and Android over Tailscale.
+r"""CopyClip: instant clipboard sync between Windows and Samsung devices over Tailscale.
 
-Laptop side. Watches the Windows clipboard, mirrors it to the phone, and applies clips the
-phone sends back. The phone runs no installed app: ClipBridge executes under the shell UID,
-which is the only non-root identity Android grants background clipboard access to.
+Entry point only. All behaviour lives in core/ (routing, dedup, durability, policy),
+nodes/ (per-device I/O) and domains/ (Samsung Continuity awareness).
+
+The devices run no installed app: ClipBridge executes under the shell UID via app_process,
+the only non-root identity Android grants background clipboard access to.
 
 Run:
     python copyclip.py            # foreground, logs to console and logs\copyclip.log
@@ -12,79 +14,86 @@ Run:
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
 import json
 import logging
 import logging.handlers
 import os
-import queue
-import re
 import signal
 import sys
-import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-import winclip  # noqa: E402
-from transports import TransportError  # noqa: E402
+from core.dedup import RecentClips              # noqa: E402
+from core.hub import Hub                        # noqa: E402
+from core.outbox import Outbox                  # noqa: E402
+from core.policy import Policy                  # noqa: E402
+from domains.sync_domain import SyncDomain      # noqa: E402
+from nodes.android_node import AndroidNode      # noqa: E402
+from nodes.windows_node import WindowsNode      # noqa: E402
+from transports import TransportError           # noqa: E402
 from transports.adb_transport import AdbTransport  # noqa: E402
 
 log = logging.getLogger("copyclip")
 
 DEFAULT_CONFIG = {
-    "transport": "adb",           # "adb" (Tier 1, tested) or "tcp" (Tier 2, Termux+Shizuku)
-    "device": "100.64.0.11:5555",
+    "devices": [
+        {"name": "phone", "transport": "adb", "device": "100.64.0.11:5555",
+         "enabled": True},
+    ],
+    "domains": [],
+
     "adb": "adb",
     "dex": "bin/clipbridge.dex",
-
-    "tcp_host": "100.64.0.11",
-    "tcp_port": 8385,
     "key_file": "copyclip.key",
+    "state_dir": "state",
+
     "max_chars": 800000,
-    "sync_laptop_to_phone": True,
-    "sync_phone_to_laptop": True,
-    "adopt_phone_clip_on_connect": False,
     "denylist_regex": [],
+    "allow_non_text": False,
+
+    "adopt_on_connect": False,
+    "dedup_ttl_s": 90.0,
     "reconnect_min_s": 1.0,
     "reconnect_max_s": 30.0,
     "idle_ping_s": 60.0,
+
     "log_level": "INFO",
 }
 
 
-def sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
+# ---------------------------------------------------------------- config
 
 def load_config(path: str) -> dict:
     cfg = dict(DEFAULT_CONFIG)
     if os.path.isfile(path):
         with open(path, "r", encoding="utf-8") as fh:
             cfg.update(json.load(fh))
+    return _migrate(cfg)
+
+
+def _migrate(cfg: dict) -> dict:
+    """Accept the v1 single-device config unchanged.
+
+    v1 had a flat `device`/`transport` pair. Rather than force a config rewrite, fold it
+    into the v2 device list so an old config keeps working exactly as before.
+    """
+    if cfg.get("devices"):
+        return cfg
+    legacy = cfg.get("device")
+    if not legacy:
+        return cfg
+    cfg["devices"] = [{
+        "name": "phone",
+        "transport": cfg.get("transport", "adb"),
+        "device": legacy,
+        "tcp_host": cfg.get("tcp_host"),
+        "tcp_port": cfg.get("tcp_port"),
+        "enabled": True,
+    }]
+    log.debug("migrated v1 single-device config")
     return cfg
-
-
-def make_transport(cfg: dict):
-    """Build the configured transport. Both tiers speak the identical ClipBridge protocol."""
-    kind = cfg.get("transport", "adb")
-    if kind == "adb":
-        return AdbTransport(cfg["device"], os.path.join(HERE, cfg["dex"]), adb=cfg["adb"])
-    if kind == "tcp":
-        from transports.tcp_transport import TcpTransport
-        key_path = os.path.join(HERE, cfg["key_file"])
-        if not os.path.isfile(key_path):
-            raise TransportError(
-                f"{key_path} missing. See termux\\setup_termux.md to create the shared key."
-            )
-        with open(key_path, "rb") as fh:
-            key = fh.read().strip()
-        if len(key) < 32:
-            raise TransportError("key file is too short; use at least 32 bytes")
-        return TcpTransport(cfg["tcp_host"], int(cfg["tcp_port"]), key)
-    raise TransportError(f"unknown transport {kind!r}; use 'adb' or 'tcp'")
 
 
 def setup_logging(level: str) -> None:
@@ -94,9 +103,12 @@ def setup_logging(level: str) -> None:
                             "%Y-%m-%d %H:%M:%S")
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
 
     fh = logging.handlers.RotatingFileHandler(
-        os.path.join(logs, "copyclip.log"), maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        os.path.join(logs, "copyclip.log"), maxBytes=2_000_000, backupCount=3,
+        encoding="utf-8")
     fh.setFormatter(fmt)
     root.addHandler(fh)
 
@@ -105,267 +117,141 @@ def setup_logging(level: str) -> None:
     root.addHandler(sh)
 
 
-class CopyClip:
-    def __init__(self, cfg: dict) -> None:
-        self.cfg = cfg
-        self.stop = threading.Event()
-        self.transport = None
-        self.lock = threading.Lock()
+# ------------------------------------------------------------- factories
 
-        # Loop guard. Every clip that crosses in either direction is recorded here; a clip is
-        # never sent back towards the side it came from. Without this, one copy ping-pongs
-        # forever, and it matters doubly here because Samsung Continuity is independently
-        # syncing this phone with the Tab S10.
-        self.last_hash: str | None = None
+def make_transport_factory(cfg: dict, dev: dict):
+    """Build a zero-arg transport factory for one device.
 
-        self.phone_locked = False
-        self.baseline_pending = not cfg["adopt_phone_clip_on_connect"]
-        self.denylist = [re.compile(p) for p in cfg["denylist_regex"]]
-        self.stats = {"to_phone": 0, "to_laptop": 0, "skipped": 0, "reconnects": 0}
+    Returns a factory rather than a transport so each reconnect gets a fresh instance,
+    and so the node never has to know which tier it is on.
+    """
+    kind = dev.get("transport", "adb")
 
-    # -- filtering ---------------------------------------------------------
+    if kind == "adb":
+        target = dev["device"]
+        dex = os.path.join(HERE, cfg["dex"])
+        adb = cfg.get("adb", "adb")
+        return lambda: AdbTransport(target, dex, adb=adb)
 
-    def _rejected(self, text: str, direction: str) -> str | None:
-        if not text:
-            return "empty"
-        if len(text) > self.cfg["max_chars"]:
-            # Skipped whole rather than truncated: a half clip pasted into a shell or an
-            # editor is worse than no clip, because it looks like it worked.
-            return f"too-large ({len(text)} chars > {self.cfg['max_chars']})"
-        for pat in self.denylist:
-            if pat.search(text):
-                return f"denylist:{pat.pattern}"
-        return None
+    if kind == "tcp":
+        from transports.tcp_transport import TcpTransport
+        key_path = os.path.join(HERE, cfg["key_file"])
+        if not os.path.isfile(key_path):
+            raise TransportError(
+                f"{key_path} missing. See termux\\setup_termux.md to create the shared key.")
+        with open(key_path, "rb") as fh:
+            key = fh.read().strip()
+        if len(key) < 32:
+            raise TransportError("key file is too short; use at least 32 bytes")
+        host = dev.get("tcp_host") or dev["device"].split(":")[0]
+        port = int(dev.get("tcp_port") or 8385)
+        return lambda: TcpTransport(host, port, key)
 
-    # -- windows -> phone --------------------------------------------------
+    raise TransportError(f"unknown transport {kind!r} for device {dev.get('name')!r}")
 
-    def on_windows_change(self) -> None:
-        if not self.cfg["sync_laptop_to_phone"]:
-            return
-        try:
-            text = winclip.read_text()
-        except winclip.ClipboardBusy as exc:
-            log.warning("windows clipboard busy: %s", exc)
-            return
-        except Exception:
-            log.exception("reading windows clipboard failed")
-            return
 
-        if text is None:
-            return  # image or files: v1 is text only
+def build_hub(cfg: dict) -> Hub:
+    laptop = WindowsNode("laptop")
+    android: dict[str, AndroidNode] = {}
+    hub_ref: dict[str, Hub] = {}
 
-        h = sha256(text)
-        with self.lock:
-            if h == self.last_hash:
-                return  # our own write coming back, or a no-op change event
-            reason = self._rejected(text, "to_phone")
-            if reason:
-                self.stats["skipped"] += 1
-                log.info("skip laptop->phone: %s", reason)
-                return
-            self.last_hash = h
-            transport = self.transport
+    def on_connect(node: AndroidNode) -> None:
+        hub = hub_ref.get("hub")
+        if hub is not None:
+            hub.on_node_connected(node)
 
-        if transport is None or not transport.alive():
-            log.debug("no channel; laptop clip not forwarded")
-            return
-        try:
-            payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
-            transport.send_line(f"SET {payload}")
-            self.stats["to_phone"] += 1
-            log.info("laptop -> phone: %d chars", len(text))
-        except TransportError as exc:
-            log.warning("send failed: %s", exc)
+    def on_lock_change(node: AndroidNode, locked: bool) -> None:
+        hub = hub_ref.get("hub")
+        if hub is not None:
+            hub.on_node_unlocked(node, locked)
 
-    # -- phone -> windows --------------------------------------------------
+    for dev in cfg["devices"]:
+        if not dev.get("enabled", True):
+            log.info("device %s disabled in config, skipping", dev.get("name"))
+            continue
+        node = AndroidNode(
+            dev["name"],
+            make_transport_factory(cfg, dev),
+            reconnect_min_s=cfg["reconnect_min_s"],
+            reconnect_max_s=cfg["reconnect_max_s"],
+            idle_ping_s=cfg["idle_ping_s"],
+            on_connect=on_connect,
+            on_lock_change=on_lock_change,
+        )
+        android[dev["name"]] = node
 
-    def handle_frame(self, line: str) -> None:
-        verb, _, rest = line.partition(" ")
+    domains = []
+    for spec in cfg.get("domains", []):
+        members = [android[n] for n in spec["members"] if n in android]
+        if len(members) < 1:
+            log.warning("domain %s has no enabled members, skipping", spec.get("name"))
+            continue
+        domains.append(SyncDomain(
+            spec["name"], members,
+            grace_s=spec.get("grace_s", 8.0),
+            fail_threshold=spec.get("fail_threshold", 3),
+        ))
 
-        if verb == "CLIP":
-            parts = line.split(" ", 3)
-            if len(parts) < 4:
-                log.warning("malformed CLIP frame")
-                return
-            _, mime, sensitive, payload = parts
-            if sensitive == "1":
-                self.stats["skipped"] += 1
-                log.info("skip phone->laptop: flagged sensitive by source app")
-                return
-            try:
-                text = base64.b64decode(payload).decode("utf-8")
-            except Exception:
-                log.exception("undecodable CLIP payload")
-                return
-            self._apply_from_phone(text, mime)
+    hub = Hub(
+        nodes=[laptop, *android.values()],
+        domains=domains,
+        policy=Policy(max_chars=cfg["max_chars"],
+                      denylist_regex=cfg["denylist_regex"],
+                      allow_non_text=cfg["allow_non_text"]),
+        outbox=Outbox(os.path.join(HERE, cfg["state_dir"], "outbox.json")),
+        dedup=RecentClips(ttl=cfg["dedup_ttl_s"]),
+        adopt_on_connect=cfg.get("adopt_on_connect", False),
+    )
+    hub_ref["hub"] = hub
+    return hub
 
-        elif verb == "LOCK":
-            locked = rest.strip() == "1"
-            if locked != self.phone_locked:
-                self.phone_locked = locked
-                log.info("phone %s", "locked (writes will be queued)" if locked else "unlocked")
 
-        elif verb == "DEFER":
-            # Expected whenever the phone is in your pocket. ClipBridge replays on unlock.
-            log.info("phone deferred write (%s); will apply on unlock", rest.strip())
-
-        elif verb == "SKIP":
-            log.debug("phone skipped clip: %s", rest.strip())
-
-        elif verb == "ERR":
-            log.warning("bridge error: %s", rest.strip())
-
-        elif verb in ("ACK", "PONG", "READY"):
-            log.debug("bridge: %s", line)
-
-        else:
-            log.debug("unknown frame: %s", line[:80])
-
-    def _apply_from_phone(self, text: str, mime: str) -> None:
-        if not self.cfg["sync_phone_to_laptop"]:
-            return
-        h = sha256(text)
-        with self.lock:
-            if h == self.last_hash:
-                return  # echo of what we just sent
-            reason = self._rejected(text, "to_laptop")
-            if reason:
-                self.stats["skipped"] += 1
-                log.info("skip phone->laptop: %s", reason)
-                return
-            if self.baseline_pending:
-                # First clip after connecting is adopted as the baseline only. Starting the
-                # daemon should not silently blow away whatever is on the laptop clipboard.
-                self.baseline_pending = False
-                self.last_hash = h
-                log.info("baseline from phone (%d chars), not applied", len(text))
-                return
-            self.last_hash = h
-
-        try:
-            winclip.write_text(text)
-            self.stats["to_laptop"] += 1
-            log.info("phone -> laptop: %d chars (%s)", len(text), mime)
-        except Exception:
-            log.exception("writing windows clipboard failed")
-
-    # -- supervisor --------------------------------------------------------
-
-    def run(self) -> int:
-        watcher = winclip.ClipboardWatcher(self.on_windows_change)
-        watcher.start()
-
-        backoff = self.cfg["reconnect_min_s"]
-        while not self.stop.is_set():
-            try:
-                transport = make_transport(self.cfg)
-                transport.start()
-            except TransportError as exc:
-                log.warning("connect failed: %s", exc)
-                log.info("retrying in %.0fs", backoff)
-                if self.stop.wait(backoff):
-                    break
-                backoff = min(backoff * 2, self.cfg["reconnect_max_s"])
-                continue
-
-            backoff = self.cfg["reconnect_min_s"]
-            with self.lock:
-                self.transport = transport
-                self.baseline_pending = not self.cfg["adopt_phone_clip_on_connect"]
-            log.info("connected to %s", self.cfg["device"])
-
-            try:
-                self._pump(transport)
-            finally:
-                with self.lock:
-                    self.transport = None
-                transport.close()
-
-            if not self.stop.is_set():
-                self.stats["reconnects"] += 1
-                log.warning("channel lost; reconnecting in %.0fs", backoff)
-                if self.stop.wait(backoff):
-                    break
-                backoff = min(backoff * 2, self.cfg["reconnect_max_s"])
-
-        watcher.stop()
-        log.info("stopped. stats=%s", self.stats)
-        return 0
-
-    def _pump(self, transport) -> None:
-        """Drain inbound frames until the channel dies."""
-        last_seen = time.time()
-        pinged = False
-        while not self.stop.is_set() and transport.alive():
-            try:
-                line = transport.inbox.get(timeout=1.0)
-            except queue.Empty:
-                idle = time.time() - last_seen
-                # A half-open channel (phone asleep, Tailscale re-routed) produces no EOF, so
-                # probe it rather than sitting on a dead pipe forever.
-                if idle > self.cfg["idle_ping_s"] and not pinged:
-                    try:
-                        transport.send_line("PING")
-                        pinged = True
-                    except TransportError:
-                        return
-                elif idle > self.cfg["idle_ping_s"] + 30:
-                    log.warning("no response to PING; assuming channel is dead")
-                    return
-                continue
-
-            last_seen = time.time()
-            pinged = False
-            if line == "ERR transport-closed":
-                return
-            try:
-                self.handle_frame(line)
-            except Exception:
-                log.exception("frame handling failed")
-
+# ---------------------------------------------------------------- status
 
 def cmd_status(cfg: dict) -> int:
-    kind = cfg.get("transport", "adb")
-    target = cfg["device"] if kind == "adb" else f"{cfg['tcp_host']}:{cfg['tcp_port']}"
-    print(f"tier   : {kind}")
-    print(f"target : {target}")
+    print(f"devices : {', '.join(d['name'] for d in cfg['devices'])}")
+    for spec in cfg.get("domains", []):
+        print(f"domain  : {spec['name']} = {' + '.join(spec['members'])}")
     dex = os.path.join(HERE, cfg["dex"])
-    print(f"dex    : {dex} {'OK' if os.path.isfile(dex) else 'MISSING (run build_dex.ps1)'}")
+    print(f"dex     : {'OK' if os.path.isfile(dex) else 'MISSING (run build_dex.ps1)'}")
+
+    import winclip
     try:
         text = winclip.read_text()
-        print(f"windows: {len(text)} chars on clipboard" if text is not None
-              else "windows: clipboard holds no text")
+        print(f"laptop  : {len(text)} chars on clipboard" if text is not None
+              else "laptop  : clipboard holds no text")
     except Exception as exc:
-        print(f"windows: FAILED ({exc})")
+        print(f"laptop  : FAILED ({exc})")
 
+    hub = build_hub(cfg)
+    hub.start()
     try:
-        t = make_transport(cfg)
-        t.start()
-    except TransportError as exc:
-        print(f"phone  : FAILED ({exc})")
-        return 1
-    try:
-        t.send_line("GET")
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            try:
-                line = t.inbox.get(timeout=deadline - time.time())
-            except queue.Empty:
-                break
-            head = line.split(" ", 1)[0]
-            if head == "CLIP":
-                n = len(base64.b64decode(line.split(" ", 3)[3]).decode("utf-8"))
-                print(f"phone  : OK, {n} chars on clipboard")
-                return 0
-            if head in ("SKIP", "ERR", "LOCK"):
-                print(f"phone  : {line}")
-                if head == "SKIP":
-                    return 0
-        print("phone  : connected but no reply to GET")
-        return 1
+        deadline = time.time() + 15
+        pending = {n for n in hub.nodes if n != "laptop"}
+        while time.time() < deadline and pending:
+            for name in list(pending):
+                if hub.nodes[name].available:
+                    pending.discard(name)
+            time.sleep(0.3)
+        for name, node in hub.nodes.items():
+            if name == "laptop":
+                continue
+            state = ("connected" if node.available else "UNREACHABLE")
+            extra = " (locked)" if node.locked else ""
+            err = f"  {node.last_error}" if not node.available and node.last_error else ""
+            print(f"{name:<8}: {state}{extra}{err}")
+        for domain in hub.domains:
+            s = domain.status()
+            print(f"{s['domain']:<8}: continuity={'healthy' if s['healthy'] else 'DEGRADED'}"
+                  f", representative={s['representative']}")
+        if not hub.outbox.is_empty():
+            print(f"outbox  : pending {', '.join(hub.outbox.keys())}")
+        return 0 if not pending else 1
     finally:
-        t.close()
+        hub.stop()
 
+
+# ------------------------------------------------------------------ main
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="CopyClip clipboard sync daemon")
@@ -379,17 +265,27 @@ def main() -> int:
     if args.status:
         return cmd_status(cfg)
 
-    app = CopyClip(cfg)
+    hub = build_hub(cfg)
 
     def handle_signal(signum, frame):
         log.info("signal %s, shutting down", signum)
-        app.stop.set()
+        hub.stop()
+        sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    log.info("CopyClip starting (device=%s)", cfg["device"])
-    return app.run()
+    log.info("CopyClip starting (devices: %s)",
+             ", ".join(d["name"] for d in cfg["devices"] if d.get("enabled", True)))
+    hub.start()
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        hub.stop()
+    return 0
 
 
 if __name__ == "__main__":
