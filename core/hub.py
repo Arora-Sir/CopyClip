@@ -48,10 +48,14 @@ class Hub:
         self._stop = threading.Event()
         self._ticker: threading.Thread | None = None
         self._route_lock = threading.Lock()
-        # Nodes whose next observed clip is treated as a baseline only. Without this,
-        # every reconnect (a network blip is enough) would overwrite whatever you just
-        # copied on the laptop with the device's older clip.
+        # Nodes whose next observed clip is adopted as a starting point rather than applied.
+        # This must happen ONLY on the first connect of this daemon's life: at startup we
+        # have no idea whether the device's clip is newer than the laptop's, so clobbering
+        # is rude. On a later reconnect the opposite is true, and re-arming it there would
+        # silently swallow a clip copied while the link was down, which is precisely the
+        # catch-up this is supposed to deliver.
         self._baseline_pending: set[str] = set()
+        self._baselined: set[str] = set()
         self.stats = {"observed": 0, "delivered": 0, "skipped": 0, "queued": 0}
 
     # -- topology ----------------------------------------------------------
@@ -284,8 +288,13 @@ class Hub:
         whatever you last copied arrives. Anything already known is filtered by dedup.
         """
         with self._route_lock:
-            self._baseline_pending.add(node.name)
-        log.info("[%s] rejoined; requesting catch-up", node.name)
+            first_time = node.name not in self._baselined
+            if first_time:
+                self._baselined.add(node.name)
+                self._baseline_pending.add(node.name)
+        log.info("[%s] %s", node.name,
+                 "connected; adopting its clip as the baseline" if first_time
+                 else "reconnected; catching up (a clip copied while it was away will apply)")
         node.request_refresh()
         self._drain_outbox()
 

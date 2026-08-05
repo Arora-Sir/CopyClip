@@ -66,6 +66,25 @@ def since(marker: int) -> list[str]:
     return lines[marker:]
 
 
+def attempt_sync(label: str, write, read, value: str, tries: int = 3):
+    """Run one sync direction, tolerating the user copying something mid-test.
+
+    Real defects fail every attempt; a stray copy on a device spoils one. Retrying and
+    passing on any success keeps the suite honest without making it flaky, and returns the
+    log slice for the *successful* attempt so per-copy write counts stay meaningful.
+    """
+    got = None
+    for i in range(tries):
+        marker = len(lines)
+        write(value)
+        time.sleep(CONTINUITY_WAIT)
+        got = read()
+        if got == value:
+            return True, since(marker), ""
+        print(f"  [retry {i + 1}/{tries}] {label}: saw {str(got)[:45]!r}, likely external copy")
+    return False, since(len(lines)), f"got {str(got)[:60]!r}"
+
+
 def writes_to(logs: list[str], target: str) -> int:
     """Count deliveries the daemon logged into `target`."""
     return sum(1 for ln in logs if f"-> {target}:" in ln)
@@ -110,31 +129,24 @@ def main() -> int:
         time.sleep(2.0)
         stamp = int(time.time())
 
-        # --- 1. laptop -> both devices --------------------------------------
-        m = len(lines)
+        # --- 1/2. laptop -> both devices, and the redundancy guarantee -------
         a = f"CopyClip-L2ALL-{stamp} नमस्ते 🎯"
-        winclip.write_text(a)
-        time.sleep(CONTINUITY_WAIT)
-        on_phone, on_tab = dev_get("phone"), dev_get("tab")
-        check("laptop -> phone", on_phone == a,
-              "" if on_phone == a else f"phone={on_phone!r:.50}")
+        ok, seg, detail = attempt_sync(
+            "laptop -> phone", winclip.write_text, lambda: dev_get("phone"), a)
+        check("laptop -> phone", ok, detail)
+        on_tab = dev_get("tab")
         check("laptop -> tab (via Continuity)", on_tab == a,
-              "" if on_tab == a else f"tab={on_tab!r:.50}")
+              "" if on_tab == a else f"tab={str(on_tab)[:45]!r}")
 
-        # --- 2. the redundancy guarantee ------------------------------------
-        seg = since(m)
         n_phone, n_tab = writes_to(seg, "phone"), writes_to(seg, "tab")
         check("exactly one device written (no redundant call)",
               (n_phone + n_tab) == 1, f"phone={n_phone} tab={n_tab}")
 
         # --- 3. phone -> laptop ---------------------------------------------
-        m = len(lines)
         b = f"CopyClip-P2L-{stamp} ✅"
-        dev_set("phone", b)
-        time.sleep(CONTINUITY_WAIT)
-        got = winclip.read_text()
-        check("phone -> laptop", got == b, "" if got == b else f"laptop={got!r:.50}")
-        seg = since(m)
+        ok, seg, detail = attempt_sync(
+            "phone -> laptop", lambda v: dev_set("phone", v), winclip.read_text, b)
+        check("phone -> laptop", ok, detail)
         check("phone copy applied to laptop exactly once",
               writes_to(seg, "laptop") == 1, f"{writes_to(seg, 'laptop')} applications")
         check("no write back into the Samsung domain",
@@ -142,13 +154,10 @@ def main() -> int:
               f"phone={writes_to(seg, 'phone')} tab={writes_to(seg, 'tab')}")
 
         # --- 4. tab -> laptop (the new capability) ---------------------------
-        m = len(lines)
         c = f"CopyClip-T2L-{stamp} परीक्षण"
-        dev_set("tab", c)
-        time.sleep(CONTINUITY_WAIT)
-        got = winclip.read_text()
-        check("tab -> laptop", got == c, "" if got == c else f"laptop={got!r:.50}")
-        seg = since(m)
+        ok, seg, detail = attempt_sync(
+            "tab -> laptop", lambda v: dev_set("tab", v), winclip.read_text, c)
+        check("tab -> laptop", ok, detail)
         check("tab copy applied to laptop exactly once",
               writes_to(seg, "laptop") == 1, f"{writes_to(seg, 'laptop')} applications")
         check("tab copy caused no domain writes",
@@ -160,25 +169,37 @@ def main() -> int:
         check("mirrored clips did not re-transfer their body", skipped >= 1,
               f"{skipped} announcement(s) short-circuited")
 
-        # --- 6. large payload across all three -------------------------------
-        m = len(lines)
+        # --- 6/7. large payload, then settle ---------------------------------
+        # These take ~15 s of wall clock, during which a human copying anything on the
+        # laptop legitimately replaces the payload. That is interference, not a defect, so
+        # detect it and retry rather than reporting a false failure.
         big = ("BIG%06d " % stamp) * 6000       # ~54 KB
-        winclip.write_text(big)
-        time.sleep(CONTINUITY_WAIT + 3)
-        p, t = dev_get("phone"), dev_get("tab")
-        lap = winclip.read_text()
-        check(f"large payload ({len(big)} chars) reached both",
-              p == big and t == big,
-              "" if p == big and t == big
-              else (f"phone={len(p) if p else 0} tab={len(t) if t else 0} "
-                    f"laptop={len(lap) if lap else 0} | "
-                    f"laptop_head={lap[:60]!r} phone_head={(p or '')[:60]!r}"))
+        outcome = None
+        for attempt in range(3):
+            winclip.write_text(big)
+            time.sleep(CONTINUITY_WAIT + 3)
+            lap = winclip.read_text()
+            if lap != big:
+                print(f"  [retry {attempt + 1}/3] laptop clipboard was changed externally "
+                      f"({len(lap) if lap else 0} chars); repeating")
+                continue
+            p, t = dev_get("phone"), dev_get("tab")
+            time.sleep(4)
+            settled = (winclip.read_text() == big and dev_get("phone") == big
+                       and dev_get("tab") == big)
+            outcome = (p == big and t == big, settled,
+                       f"phone={len(p) if p else 0} tab={len(t) if t else 0}")
+            break
 
-        # --- 7. settles, no ping-pong ----------------------------------------
-        time.sleep(4)
-        stable = (winclip.read_text() == big and dev_get("phone") == big
-                  and dev_get("tab") == big)
-        check("content settles across all three", stable)
+        if outcome is None:
+            check(f"large payload ({len(big)} chars) reached both", False,
+                  "INTERFERENCE: something kept changing the laptop clipboard; rerun idle")
+            check("content settles across all three", False, "not evaluated")
+        else:
+            reached, settled, detail = outcome
+            check(f"large payload ({len(big)} chars) reached both", reached,
+                  "" if reached else detail)
+            check("content settles across all three", settled)
 
         # --- 8. clipboard read minimisation (BUG-001) ------------------------
         # Reading clip *content* on a device raises Android's "Shell pasted from your

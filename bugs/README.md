@@ -10,6 +10,7 @@ in real use, not merely when a test passes.
 | :--- | :--- | :--- | :--- |
 | [BUG-001](BUG-001-clipboard-toast-storm.md) | Toast storm on every copy; Link to Windows reads the clipboard despite being "off" | Medium (noise, privacy) | **OPEN, fix applied, awaiting confirmation** |
 | [BUG-002](BUG-002-windows-emptyclipboard-1418.md) | `EmptyClipboard failed (err=1418)` drops the clip entirely | **High (data loss)** | **OPEN, fix applied, awaiting confirmation** |
+| [BUG-003](BUG-003-duplicate-daemon-instances.md) | Two daemons run at once: every laptop copy lands on the phone twice, and log lines go missing | High | **OPEN, fix applied, awaiting confirmation** |
 
 ## Companion files
 
@@ -31,3 +32,6 @@ Two rules that came out of BUG-001 and are worth keeping:
 2. **Say when a root cause is inferred rather than proven.** BUG-002 fixes three real
    defects but the exact interleaving that triggered it was never reproduced, and the file
    says so.
+3. **Measure content, not just events.** BUG-003's first measurement counted clipboard
+   *changes* and appeared to confirm a duplicate that was really unrelated copying on the
+   laptop. Counting transitions into a known content hash gave the correct answer.

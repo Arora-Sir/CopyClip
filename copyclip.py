@@ -29,6 +29,7 @@ from core.dedup import RecentClips              # noqa: E402
 from core.hub import Hub                        # noqa: E402
 from core.outbox import Outbox                  # noqa: E402
 from core.policy import Policy                  # noqa: E402
+from core.single_instance import AlreadyRunning, SingleInstance  # noqa: E402
 from domains.sync_domain import SyncDomain      # noqa: E402
 from nodes.android_node import AndroidNode      # noqa: E402
 from nodes.windows_node import WindowsNode      # noqa: E402
@@ -259,6 +260,8 @@ def main() -> int:
     ap.add_argument("--status", action="store_true", help="one-shot connectivity check")
     ap.add_argument("--log-level", default=None,
                     help="override config log_level (DEBUG shows per-frame routing)")
+    ap.add_argument("--replace", action="store_true",
+                    help="stop an already-running CopyClip and take over")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -267,17 +270,27 @@ def main() -> int:
     if args.status:
         return cmd_status(cfg)
 
+    # Refuse to run twice. Two daemons duplicate every write to the devices and make the
+    # logs look unreliable, which is far more confusing than a clear refusal here.
+    guard = SingleInstance(os.path.join(HERE, cfg["state_dir"], "copyclip.pid"))
+    try:
+        guard.acquire(replace=args.replace)
+    except AlreadyRunning as exc:
+        log.error("%s", exc)
+        return 2
+
     hub = build_hub(cfg)
 
     def handle_signal(signum, frame):
         log.info("signal %s, shutting down", signum)
         hub.stop()
+        guard.release()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    log.info("CopyClip starting (devices: %s)",
+    log.info("CopyClip starting (pid %d, devices: %s)", os.getpid(),
              ", ".join(d["name"] for d in cfg["devices"] if d.get("enabled", True)))
     hub.start()
     try:
@@ -287,6 +300,7 @@ def main() -> int:
         pass
     finally:
         hub.stop()
+        guard.release()
     return 0
 
 

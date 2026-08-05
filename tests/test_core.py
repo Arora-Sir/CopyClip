@@ -222,6 +222,49 @@ def test_domain():
           solo._consecutive_misses == 1)
 
 
+# ------------------------------------------------------- single instance
+
+def test_single_instance():
+    """BUG-003: a second daemon must be refused.
+
+    Two daemons is not a benign duplicate. Each independently watches the Windows clipboard
+    and independently writes to the devices, so one copy on the laptop lands on the phone
+    TWICE, and an incoming clip is applied by whichever instance wins the race, leaving the
+    other console silent. It reads as flaky sync, not as a duplicate process.
+    """
+    from core.single_instance import AlreadyRunning, SingleInstance
+
+    tmp = tempfile.mkdtemp(prefix="copyclip-si-")
+    try:
+        pidfile = os.path.join(tmp, "state", "copyclip.pid")
+
+        first = SingleInstance(pidfile)
+        first.acquire()
+        check("first instance acquires the singleton", True)
+        check("pid file written", os.path.isfile(pidfile))
+
+        second = SingleInstance(pidfile)
+        try:
+            second.acquire()
+            second.release()
+            check("second instance is refused", False, "it was allowed to start")
+        except AlreadyRunning as exc:
+            check("second instance is refused", True, f"error names PID {exc.pid}")
+
+        first.release()
+
+        third = SingleInstance(pidfile)
+        try:
+            third.acquire()
+            check("singleton is reusable after a clean release", True)
+            third.release()
+        except AlreadyRunning:
+            check("singleton is reusable after a clean release", False,
+                  "the guard leaked and would block every future start")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # --------------------------------------------------------------- winclip
 
 def test_winclip_concurrency():
@@ -291,7 +334,8 @@ def test_winclip_concurrency():
 def main() -> int:
     for name, fn in [("payload", test_payload), ("dedup", test_dedup),
                      ("outbox", test_outbox), ("policy", test_policy),
-                     ("domain", test_domain), ("winclip", test_winclip_concurrency)]:
+                     ("domain", test_domain), ("single-instance", test_single_instance),
+                     ("winclip", test_winclip_concurrency)]:
         print(f"{name}:")
         fn()
     print()
