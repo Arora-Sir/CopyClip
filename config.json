@@ -41,6 +41,7 @@
   "reconnect_min_s": 1.0,
   "reconnect_max_s": 30.0,
   "idle_ping_s": 60.0,
+  "ack_timeout_s": 4.0,
 
   "log_level": "INFO"
 }

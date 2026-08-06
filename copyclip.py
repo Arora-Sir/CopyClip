@@ -59,6 +59,7 @@ DEFAULT_CONFIG = {
     "reconnect_min_s": 1.0,
     "reconnect_max_s": 30.0,
     "idle_ping_s": 60.0,
+    "ack_timeout_s": 4.0,
 
     "log_level": "INFO",
 }
@@ -176,6 +177,7 @@ def build_hub(cfg: dict) -> Hub:
             reconnect_min_s=cfg["reconnect_min_s"],
             reconnect_max_s=cfg["reconnect_max_s"],
             idle_ping_s=cfg["idle_ping_s"],
+            ack_timeout_s=cfg["ack_timeout_s"],
             on_connect=on_connect,
             on_lock_change=on_lock_change,
         )

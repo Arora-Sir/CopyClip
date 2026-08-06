@@ -15,6 +15,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 
 # Two tests deliberately trigger error paths (a corrupt outbox, a degraded domain). Their
@@ -148,6 +149,39 @@ def test_outbox():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_outbox_put_skips_unchanged_reput():
+    """Regression: re-arming the exact same content under a key used to fsync to disk and
+    log on every call, no matter how many times a retry loop called put() for content that
+    hadn't changed -- real, avoidable CPU/IO cost on every failed retry tick.
+    """
+    tmp = tempfile.mkdtemp(prefix="copyclip-outboxreput-")
+    try:
+        path = os.path.join(tmp, "state", "outbox.json")
+        ob = Outbox(path)
+        p = ClipPayload.from_text("same content", origin="laptop")
+
+        ob.put("domain:samsung", p)
+        mtime_after_first = os.path.getmtime(path)
+
+        time.sleep(0.05)
+        ob.put("domain:samsung", p)   # identical content, same key -- should be a no-op
+        mtime_after_second = os.path.getmtime(path)
+
+        check("re-arming identical content does not touch disk again",
+              mtime_after_second == mtime_after_first)
+        check("slot still holds exactly the one entry",
+              ob.peek("domain:samsung").text == "same content")
+
+        different = ClipPayload.from_text("different content", origin="laptop")
+        ob.put("domain:samsung", different)
+        check("genuinely different content still gets saved",
+              os.path.getmtime(path) != mtime_after_first)
+        check("slot now holds the new content", ob.peek("domain:samsung").text
+              == "different content")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- policy
 
 def test_policy():
@@ -239,6 +273,194 @@ def test_hub_stamp_attribution():
         hub.on_clip(p)
         check("laptop received clip from phone", len(laptop.writes) == 1)
         check("stamp cleared after correlation", hub._last_stamp_node is None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ------------------------------------------------ locked domain member
+
+def test_hub_routes_around_locked_domain_member():
+    """A locked phone must not block laptop -> tablet delivery.
+
+    SyncDomain.representative() already proves the *choice* switches to the tablet
+    (test_domain, above). This proves the hub actually *acts* on that choice: the tablet's
+    write() fires and the locked phone's does not.
+    """
+    from core.hub import Hub
+
+    laptop, phone, tab = FakeNode("laptop"), FakeNode("phone", locked=True), FakeNode("tab")
+    dom = SyncDomain("samsung", [phone, tab])
+    pol = Policy()
+    tmp = tempfile.mkdtemp(prefix="copyclip-lockedtest-")
+    try:
+        ob = Outbox(os.path.join(tmp, "outbox.json"))
+        hub = Hub(nodes=[laptop, phone, tab], domains=[dom], policy=pol, outbox=ob)
+
+        p = ClipPayload.from_text("laptop copy while phone is locked", origin="laptop")
+        hub.on_clip(p)
+
+        check("tablet received the write", len(tab.writes) == 1 and tab.writes[0] is p)
+        check("locked phone received nothing", len(phone.writes) == 0)
+        check("delivered stat incremented", hub.stats["delivered"] == 1)
+
+        # Bonus: the other untested branch of the same function -- both domain members
+        # unreachable means the clip is queued, not dropped (this is the exact class of bug
+        # BUG-002 fixed for single nodes; the domain path deserves the same proof). Locked
+        # alone is not enough here: representative()'s fallback loop still hands an
+        # available-but-locked phone the job, so both must be unavailable to empty targets.
+        phone._available = False
+        tab._available = False
+        p2 = ClipPayload.from_text("laptop copy while everything is unreachable",
+                                    origin="laptop")
+        hub.on_clip(p2)
+        check("fully-blocked domain queues rather than drops",
+              ob.peek("domain:samsung") is not None
+              and ob.peek("domain:samsung").text == p2.text)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_repeat_copy_reaches_node_missed_by_first_delivery():
+    """Regression: re-copying identical text must still reach a node the first delivery
+    missed, not be silently dropped as an 'echo' just because the hash repeats.
+    """
+    from core.hub import Hub
+
+    laptop, phone, tab = FakeNode("laptop"), FakeNode("phone"), FakeNode("tab")
+    dom = SyncDomain("samsung", [phone, tab])
+    pol = Policy()
+    tmp = tempfile.mkdtemp(prefix="copyclip-repeattest-")
+    try:
+        ob = Outbox(os.path.join(tmp, "outbox.json"))
+        hub = Hub(nodes=[laptop, phone, tab], domains=[dom], policy=pol, outbox=ob)
+
+        p = ClipPayload.from_text("same word", origin="laptop")
+        hub.on_clip(p)
+        check("first copy delivered to the representative (phone)", len(phone.writes) == 1)
+        check("tablet did not also get it (single-representative optimization holds)",
+              len(tab.writes) == 0)
+
+        # Phone goes unreachable, mirroring a mid-copy Tailscale drop.
+        phone._available = False
+
+        p2 = ClipPayload.from_text("same word", origin="laptop")   # identical text/sha
+        hub.on_clip(p2)
+        check("re-copying identical text still reaches the tablet once phone is gone",
+              len(tab.writes) == 1)
+        check("unreachable phone was not written to again", len(phone.writes) == 1)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_domain_failure_queues_once_not_twice():
+    """Regression: a failed domain write used to queue BOTH 'node:<name>' and
+    'domain:<name>' for the same payload. The stray node-level entry bypassed the domain's
+    own representative re-election on retry and could survive to fire a stale rewrite well
+    after the domain had recovered -- part of what produced a real phone<->tablet loop.
+    """
+    from core.hub import Hub
+
+    laptop, phone, tab = FakeNode("laptop"), FakeNode("phone"), FakeNode("tab")
+    phone.result = WriteResult.FAILED
+    dom = SyncDomain("samsung", [phone, tab])
+    pol = Policy()
+    tmp = tempfile.mkdtemp(prefix="copyclip-dqueue-")
+    try:
+        ob = Outbox(os.path.join(tmp, "outbox.json"))
+        hub = Hub(nodes=[laptop, phone, tab], domains=[dom], policy=pol, outbox=ob)
+
+        p = ClipPayload.from_text("will fail", origin="laptop")
+        hub.on_clip(p)
+
+        check("domain-level entry queued", ob.peek("domain:samsung") is not None)
+        check("no stray node-level entry for the failed representative",
+              ob.peek("node:phone") is None)
+        check("phone write was actually attempted", len(phone.writes) == 1)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_domain_delivery_already_satisfied_is_not_requeued():
+    """Regression: an outbox entry that becomes satisfied by some other path (e.g. the
+    representative already got this exact content through a different delivery) used to be
+    indistinguishable from a genuine failure -- _deliver_to_node returned False either way,
+    so _deliver_to_domain kept re-queuing (and re-logging, re-saving) it every tick until the
+    dedup record's 90s TTL expired. That is also how a long-stale write could fire a
+    "phantom" delivery well after the fact. Also verifies the fix doesn't call note_write for
+    the already-satisfied case, which would otherwise falsely trip the domain into
+    "degraded" (a health probe armed for content nobody needs to re-confirm just times out).
+    """
+    from core.hub import Hub
+
+    laptop, phone, tab = FakeNode("laptop"), FakeNode("phone"), FakeNode("tab")
+    dom = SyncDomain("samsung", [phone, tab])
+    pol = Policy()
+    tmp = tempfile.mkdtemp(prefix="copyclip-alreadysat-")
+    try:
+        ob = Outbox(os.path.join(tmp, "outbox.json"))
+        hub = Hub(nodes=[laptop, phone, tab], domains=[dom], policy=pol, outbox=ob)
+
+        p = ClipPayload.from_text("already delivered elsewhere", origin="laptop")
+        hub.dedup.mark_delivered(p.sha256, "phone")   # phone already has this, per dedup
+
+        satisfied = hub._deliver_to_domain(dom, p)
+
+        check("reported as satisfied, not needing retry", satisfied is True)
+        check("no write attempted against the node that already has it",
+              len(phone.writes) == 0)
+        check("nothing queued to the outbox", ob.peek("domain:samsung") is None)
+        check("no health probe armed for a no-op delivery", dom._probe is None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_drain_outbox_serializes_with_route_lock():
+    """Regression: _drain_outbox() used to run without route_lock held, so a tick-thread
+    retry could race a concurrently in-flight on_clip()-triggered write to the same node --
+    AndroidNode's ACK-correlation state has no lock of its own and assumes only one write
+    is ever in flight. Verified here by holding route_lock and confirming drain blocks.
+
+    Needs a real queued entry: the lock is now taken per outbox key (not once for the whole
+    drain), so an empty outbox would never touch route_lock at all and this test would pass
+    for the wrong reason.
+    """
+    from core.hub import Hub
+
+    laptop = FakeNode("laptop")
+    pol = Policy()
+    tmp = tempfile.mkdtemp(prefix="copyclip-drainlock-")
+    try:
+        ob = Outbox(os.path.join(tmp, "outbox.json"))
+        ob.put("node:laptop", ClipPayload.from_text("queued", origin="phone"))
+        hub = Hub(nodes=[laptop], domains=[], policy=pol, outbox=ob)
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def hold_lock():
+            with hub._route_lock:
+                entered.set()
+                release.wait(timeout=2)
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        entered.wait(timeout=2)
+
+        drained = threading.Event()
+
+        def do_drain():
+            hub._drain_outbox()
+            drained.set()
+
+        drainer = threading.Thread(target=do_drain)
+        drainer.start()
+        blocked = not drained.wait(timeout=0.3)
+        check("drain_outbox blocks while route_lock is held elsewhere", blocked)
+
+        release.set()
+        holder.join(timeout=2)
+        drainer.join(timeout=2)
+        check("drain_outbox completes once the lock is released", drained.is_set())
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -354,8 +576,15 @@ def test_winclip_concurrency():
 
 def main() -> int:
     for name, fn in [("payload", test_payload), ("dedup", test_dedup),
-                     ("outbox", test_outbox), ("policy", test_policy),
+                     ("outbox", test_outbox),
+                     ("outbox-no-reput", test_outbox_put_skips_unchanged_reput),
+                     ("policy", test_policy),
                      ("domain", test_domain), ("hub-stamp", test_hub_stamp_attribution),
+                     ("hub-locked-member", test_hub_routes_around_locked_domain_member),
+                     ("hub-repeat-copy", test_repeat_copy_reaches_node_missed_by_first_delivery),
+                     ("hub-no-double-queue", test_domain_failure_queues_once_not_twice),
+                     ("hub-already-satisfied", test_domain_delivery_already_satisfied_is_not_requeued),
+                     ("hub-drain-lock", test_drain_outbox_serializes_with_route_lock),
                      ("single-instance", test_single_instance),
                      ("winclip", test_winclip_concurrency)]:
         print(f"{name}:")

@@ -32,7 +32,7 @@ TransportFactory = Callable[[], object]
 class AndroidNode(ClipboardNode):
     def __init__(self, name: str, transport_factory: TransportFactory, *,
                  reconnect_min_s: float = 1.0, reconnect_max_s: float = 30.0,
-                 idle_ping_s: float = 60.0,
+                 idle_ping_s: float = 60.0, ack_timeout_s: float = 4.0,
                  on_connect: Callable[["AndroidNode"], None] | None = None,
                  on_lock_change: Callable[["AndroidNode", bool], None] | None = None) -> None:
         super().__init__(name)
@@ -40,6 +40,7 @@ class AndroidNode(ClipboardNode):
         self.reconnect_min_s = reconnect_min_s
         self.reconnect_max_s = reconnect_max_s
         self.idle_ping_s = idle_ping_s
+        self.ack_timeout_s = ack_timeout_s
         self._on_connect = on_connect
         self._on_lock_change = on_lock_change
 
@@ -51,6 +52,12 @@ class AndroidNode(ClipboardNode):
         self._lock = threading.Lock()
         self._mode = "full"
         self.last_error: str | None = None
+        # Correlates an in-flight write() with the ACK/DEFER that answers it, so a write
+        # can be confirmed rather than assumed. Only one write is ever in flight at a time
+        # (the hub serialises all routing under one lock), so a single pair of fields here
+        # is sufficient.
+        self._ack_event = threading.Event()
+        self._ack_verb: str | None = None
 
     # -- state -------------------------------------------------------------
 
@@ -222,6 +229,11 @@ class AndroidNode(ClipboardNode):
         elif verb == "DEFER":
             # Normal whenever the device is in your pocket; ClipBridge replays on unlock.
             log.info("[%s] write deferred (%s); will apply on unlock", self.name, rest.strip())
+            # A DEFER is just as much proof the channel is alive as an ACK -- the write
+            # reached ClipBridge, it just needs replaying later. Confirms a pending write().
+            deferred_verb = rest.strip().split(" ", 1)[0]
+            if self._ack_verb is not None and deferred_verb == self._ack_verb:
+                self._ack_event.set()
 
         elif verb == "SKIP":
             log.debug("[%s] device skipped clip: %s", self.name, rest.strip())
@@ -229,7 +241,16 @@ class AndroidNode(ClipboardNode):
         elif verb == "ERR":
             log.warning("[%s] bridge error: %s", self.name, rest.strip())
 
-        elif verb in ("ACK", "PONG", "READY"):
+        elif verb == "ACK":
+            # Confirms a pending write() -- see the timeout-based fallback in write() for
+            # why a write can no longer be assumed to have succeeded just because the local
+            # pipe write didn't raise.
+            acked_verb = rest.strip().split(" ", 1)[0]
+            if self._ack_verb is not None and acked_verb == self._ack_verb:
+                self._ack_event.set()
+            log.debug("[%s] %s", self.name, line)
+
+        elif verb in ("PONG", "READY"):
             log.debug("[%s] %s", self.name, line)
 
         else:
@@ -244,11 +265,29 @@ class AndroidNode(ClipboardNode):
             transport = self._transport
         if transport is None or not self._connected:
             return WriteResult.UNAVAILABLE
+
+        self._ack_event.clear()
+        self._ack_verb = "set"
         try:
             transport.send_line(f"SET {payload.to_b64()}")
         except TransportError as exc:
             log.warning("[%s] write failed: %s", self.name, exc)
+            self._ack_verb = None
             return WriteResult.FAILED
+
+        # A successful local pipe write proves nothing about whether the phone actually
+        # got it -- that pipe is to the local adb process, not to the device. Wait for
+        # ClipBridge's own ACK/DEFER before calling this delivered; a real round trip over
+        # this protocol measures well under a second, so a multi-second silence means the
+        # channel is dead, not just slow.
+        confirmed = self._ack_event.wait(timeout=self.ack_timeout_s)
+        self._ack_verb = None
+        if not confirmed:
+            log.warning("[%s] no ACK/DEFER for SET within %.1fs; treating channel as dead",
+                        self.name, self.ack_timeout_s)
+            transport.mark_dead()
+            return WriteResult.FAILED
+
         # ClipBridge answers DEFER rather than ACK when the keyguard is up, and replays it
         # itself on unlock, so a locked device is reported honestly instead of as success.
         return WriteResult.DEFERRED if self._locked else WriteResult.OK

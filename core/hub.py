@@ -180,11 +180,15 @@ class Hub:
                              source, payload.char_len)
                     return
 
-            if not is_new:
-                log.debug("echo of %s on %s, ignoring", payload.short, source)
-                return
-
-            self.stats["observed"] += 1
+            if is_new:
+                self.stats["observed"] += 1
+            else:
+                # Not new does not mean fully delivered: a node can still lack this exact
+                # content (e.g. a write to it was silently lost). Keep going into _route()
+                # so the per-node should_deliver() check below decides who still needs it,
+                # rather than bailing out on the hash alone.
+                log.debug("%s already observed; re-checking whether any node still lacks it",
+                          payload.short)
 
             reason = self.policy.reject_reason(payload)
             if reason:
@@ -224,28 +228,58 @@ class Hub:
             self._deliver_to_domain(domain, payload, origin_display=origin_display)
 
     def _deliver_to_domain(self, domain: SyncDomain, payload: ClipPayload,
-                           origin_display: str | None = None) -> None:
+                           origin_display: str | None = None) -> bool:
+        """Returns True once nothing is left outstanding for this domain (delivered now or
+        already held), so callers -- specifically _drain_outbox -- know whether to clear the
+        outbox entry. Do not infer this from stats["delivered"]: an already-satisfied target
+        resolves without incrementing it.
+        """
         targets = domain.write_targets()
         if not targets:
             self.outbox.put(f"domain:{domain.name}", payload)
             self.stats["queued"] += 1
-            return
-        wrote_any = False
+            return False
+        sha = payload.sha256
+        satisfied = False
         for node in targets:
-            if self._deliver_to_node(node, payload, origin_display=origin_display):
-                wrote_any = True
-                domain.note_write(payload.sha256, node)
-        if not wrote_any:
+            # Captured before the call: this is the only way to know whether
+            # _deliver_to_node is about to attempt a genuine write or short-circuit because
+            # the node already has this content. note_write() below must only fire for a
+            # real write -- redundantly re-arming it for an already-satisfied node makes the
+            # health probe time out every grace_s against a device with nothing new to
+            # confirm, which falsely trips the domain into "degraded" after fail_threshold
+            # misses even though nothing is actually wrong.
+            fresh = self.dedup.should_deliver(sha, node.name)
+            # queue_on_failure=False: a domain target that fails is this function's problem,
+            # not _deliver_to_node's. Queuing at the node level here used to leave a stray
+            # "node:<name>" entry alongside the "domain:<name>" one below for the exact same
+            # payload -- retrying the node-level entry writes straight back to that specific
+            # device, bypassing the domain's own representative re-election, and could
+            # survive to fire a stale rewrite well after the domain had already recovered.
+            if self._deliver_to_node(node, payload, origin_display=origin_display,
+                                      queue_on_failure=False):
+                satisfied = True
+                if fresh:
+                    domain.note_write(sha, node)
+        if not satisfied:
             self.outbox.put(f"domain:{domain.name}", payload)
             self.stats["queued"] += 1
+        return satisfied
 
     def _deliver_to_node(self, node: ClipboardNode, payload: ClipPayload,
-                         origin_display: str | None = None) -> bool:
+                         origin_display: str | None = None, *,
+                         queue_on_failure: bool = True) -> bool:
         sha = payload.sha256
         display = origin_display or payload.origin
         if not self.dedup.should_deliver(sha, node.name):
+            # Nothing outstanding for this node -- treat as satisfied, not failed. Returning
+            # False here used to make a stale outbox entry for an already-delivered payload
+            # re-queue itself forever (every tick, with its own log line and disk write)
+            # until the dedup record's TTL expired, up to 90s later -- which is exactly how
+            # a long-since-superseded write could fire a "phantom" delivery well after the
+            # fact.
             log.debug("%s already holds %s", node.name, payload.short)
-            return False
+            return True
 
         result = node.write(payload)
 
@@ -263,11 +297,16 @@ class Hub:
             # FAILED is queued too, not just UNAVAILABLE. A transient local failure (a
             # clipboard the OS briefly would not hand over, say) used to be logged and the
             # clip discarded outright, which is how a 93 KB clip from the tablet was lost.
-            # The outbox tick retries it.
-            self.outbox.put(f"node:{node.name}", payload)
-            self.stats["queued"] += 1
+            # The outbox tick retries it. queue_on_failure is False when this node is a
+            # domain target: the caller (_deliver_to_domain) queues once at the domain
+            # level instead, so retry re-runs representative election rather than forcing
+            # this exact device again.
+            if queue_on_failure:
+                self.outbox.put(f"node:{node.name}", payload)
+                self.stats["queued"] += 1
             if result == WriteResult.FAILED:
-                log.warning("%s -> %s failed; queued for retry", display, node.name)
+                log.warning("%s -> %s failed%s", display, node.name,
+                            "; queued for retry" if queue_on_failure else "")
             return False
 
         log.warning("%s -> %s rejected (%s)", display, node.name, result)
@@ -276,27 +315,34 @@ class Hub:
     # -- recovery ----------------------------------------------------------
 
     def _drain_outbox(self) -> None:
-        for key in self.outbox.keys():
-            payload = self.outbox.peek(key)
-            if payload is None:
-                continue
-            kind, _, ident = key.partition(":")
-
-            if kind == "node":
-                node = self.nodes.get(ident)
-                if node is None or not node.available:
+        # Locked per entry, not for the whole drain: node.write() can now block for real
+        # (waiting on an ACK), and AndroidNode's ack-correlation state is not itself safe
+        # against two writes to the same node overlapping, so each individual delivery
+        # attempt still needs to be atomic against on_clip()'s _route() chain. But holding
+        # the lock for the *entire* loop let one slow or genuinely-still-failing entry starve
+        # a concurrent, unrelated on_clip() call for as long as the whole backlog took to
+        # walk -- narrowing to per-entry keeps the same race protection with a much smaller
+        # worst-case latency hit on real-time events.
+        for key in list(self.outbox.keys()):
+            with self._route_lock:
+                payload = self.outbox.peek(key)
+                if payload is None:
                     continue
-                if self._deliver_to_node(node, payload):
-                    self.outbox.clear(key)
+                kind, _, ident = key.partition(":")
 
-            elif kind == "domain":
-                domain = next((d for d in self.domains if d.name == ident), None)
-                if domain is None or not domain.write_targets():
-                    continue
-                before = self.stats["delivered"]
-                self._deliver_to_domain(domain, payload)
-                if self.stats["delivered"] > before:
-                    self.outbox.clear(key)
+                if kind == "node":
+                    node = self.nodes.get(ident)
+                    if node is None or not node.available:
+                        continue
+                    if self._deliver_to_node(node, payload):
+                        self.outbox.clear(key)
+
+                elif kind == "domain":
+                    domain = next((d for d in self.domains if d.name == ident), None)
+                    if domain is None or not domain.write_targets():
+                        continue
+                    if self._deliver_to_domain(domain, payload):
+                        self.outbox.clear(key)
 
     def on_node_connected(self, node: ClipboardNode) -> None:
         """Catch-up when a node rejoins.

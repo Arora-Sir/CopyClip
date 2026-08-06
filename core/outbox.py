@@ -38,6 +38,13 @@ class Outbox:
 
     def put(self, key: str, payload: ClipPayload) -> None:
         with self._lock:
+            existing = self._slots.get(key)
+            if existing is not None and existing.sha256 == payload.sha256:
+                # Re-arming the exact content already queued under this key. A caller that
+                # retries every tick would otherwise fsync to disk and log this line on every
+                # single attempt for as long as delivery keeps failing -- real CPU/IO cost
+                # and log noise for something that hasn't actually changed.
+                return
             self._slots[key] = payload
             self._save()
         log.info("outbox[%s] holding %s (target unavailable)", key, payload.short)

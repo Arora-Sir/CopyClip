@@ -54,6 +54,15 @@ class Transport(abc.ABC):
     def alive(self) -> bool:
         return not self._dead.is_set()
 
+    def mark_dead(self) -> None:
+        """Declare the channel dead from outside the transport's own reader thread.
+
+        Used when a caller has independent proof the channel is gone (e.g. no ACK for a
+        write within a sane timeout) so the supervisor notices immediately via alive(),
+        instead of waiting on a slower passive detection path.
+        """
+        self._mark_dead()
+
     def _mark_dead(self) -> None:
         self._dead.set()
 
