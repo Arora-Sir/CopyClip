@@ -111,6 +111,25 @@ public final class ClipBridge {
      */
     private static volatile String suppressHash;
 
+    /**
+     * Last time a line arrived from the laptop over stdin, any verb.
+     *
+     * The laptop pings every idle_ping_s (60s) when otherwise quiet, so this should never
+     * drift far behind "now" on a healthy connection. When the network drops, readCommands()
+     * only learns about it once the OS actually closes the pipe, which can lag noticeably
+     * behind the network actually going down. Until then this process keeps polling and, if
+     * still in full mode, keeps reading content -- see the orphan check in serve() below.
+     */
+    private static volatile long lastHubContact = System.currentTimeMillis();
+
+    /**
+     * How long without a word from the laptop before treating this process as orphaned and
+     * suppressing content reads, same as stampOnly. Deliberately well above the laptop's own
+     * 60s idle-ping cycle (plus its ~30s grace waiting on a PONG) so a completely healthy but
+     * quiet connection never trips this by mistake.
+     */
+    private static final long IDLE_ORPHAN_MS = 100_000L;
+
     public static void main(String[] args) {
         out = new PrintStream(new java.io.FileOutputStream(java.io.FileDescriptor.out), true,
                 StandardCharsets.UTF_8);
@@ -449,6 +468,12 @@ public final class ClipBridge {
                         emit("STAMP " + stamp);
                     } else if (stampOnly) {
                         emit("STAMP " + stamp);
+                    } else if (System.currentTimeMillis() - lastHubContact > IDLE_ORPHAN_MS) {
+                        // Orphaned: the laptop has been silent well past its own idle-ping
+                        // cycle, most likely because the network dropped and this process
+                        // just hasn't been torn down yet. Treat like stampOnly until contact
+                        // resumes, rather than reading content nobody can currently receive.
+                        emit("STAMP " + stamp);
                     } else {
                         emitDesc();
                     }
@@ -465,6 +490,7 @@ public final class ClipBridge {
                 new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
             String line;
             while ((line = in.readLine()) != null) {
+                lastHubContact = System.currentTimeMillis();
                 line = line.trim();
                 if (line.isEmpty()) {
                     continue;
