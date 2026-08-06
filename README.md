@@ -3,6 +3,10 @@
 One clipboard across **predator-helios-300** (Windows 11), **s24-ultra** (Galaxy S24 Ultra)
 and **tab-s10-ultra** (Galaxy Tab S10 Ultra), over Tailscale.
 
+Setup and quick reference below. For the full architecture, wire protocol, every tuning
+knob and why it's set the way it is, and postmortems of real bugs found in production, see
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
 Copy anywhere, paste anywhere. No app installed on either Samsung device, no cloud, no
 account, no pip dependencies.
 
@@ -168,6 +172,7 @@ script in this folder.
 | `adopt_on_connect` | `false` stops a reconnect from overwriting what you just copied on the laptop with a device's older clip |
 | `dedup_ttl_s` | How long a clip is remembered. Longer than Samsung's ~2.5 s relay, short enough that deliberately re-copying works |
 | `denylist_regex` | Clips matching any pattern are never synced |
+| `ack_timeout_s` | How long a write waits for the device's real `ACK`/`DEFER` reply before being treated as failed. A successful local pipe write is not proof the device received it; this is what actually confirms delivery. See [ARCHITECTURE.md §6.3](ARCHITECTURE.md#63-ack-confirmed-writes) |
 
 Devices are addressed by **raw Tailscale IP, never MagicDNS**, which sidesteps NRPT
 resolution breaking.
@@ -235,14 +240,17 @@ python copyclip.py --status
 ```
 
 Shows each device, the elected representative, Continuity health, and anything pending in
-the outbox. Add `--log-level DEBUG` to the daemon to see every routing decision.
+the outbox. Add `--log-level DEBUG` to the daemon to see every routing decision, or just
+double-click `Start CopyClip (Debug).bat` for the same thing without typing the flag.
 
 ---
 
 ## Future scope
 
 Designed for, deliberately not built. The wire protocol already carries a MIME type and the
-payload model is bytes, so these land at the `nodes/` boundary without touching the hub.
+payload model is bytes, so these land at the `nodes/` boundary without touching the hub. Full
+detail, including exactly which existing config flag and which files each of these would
+touch: [ARCHITECTURE.md §11](ARCHITECTURE.md#11-future-scope-designed-for-not-built).
 
 - **Images.** Windows `CF_DIB` to Android needs a MediaStore insert to obtain a `content://`
   URI for `ClipData.newUri()`; a `file://` URI throws `FileUriExposedException`, which is the
