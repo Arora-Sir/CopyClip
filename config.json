@@ -34,6 +34,11 @@
   "denylist_regex": [],
   "allow_non_text": false,
 
+  "_images": "allow_images defaults false (fail-safe) until real-use verification per bugs/SPIKE-IMAGE-CLIPBOARD.md's open Q5/Q7 is confirmed. max_image_bytes is independently enforced on both the laptop (core/policy.py) and each device (android/ClipBridge.java's own MAX_IMAGE_BYTES) -- belt and braces, not just one check.",
+  "allow_images": true,
+  "max_image_bytes": 25165824,
+  "image_chunk_bytes": 49152,
+
   "_adopt_on_connect": "false keeps a reconnect from overwriting what you just copied on the laptop with the device's older clip.",
   "adopt_on_connect": false,
 

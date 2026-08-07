@@ -53,11 +53,20 @@ if (Test-Path $classDir) { Remove-Item $classDir -Recurse -Force }
 New-Item -ItemType Directory -Path $classDir -Force | Out-Null
 New-Item -ItemType Directory -Path $outDir   -Force | Out-Null
 
+# android/android/content/IContentProvider.java is a 5-line stub exposing the one hidden
+# type ClipBridge's FakeContext needs (android.content.IContentProvider is @hide) -- the
+# real interface is supplied by the boot classloader at runtime. Compiles fine against the
+# stock android.jar above; no patched hidden-API jar needed. See
+# otherCopyProjects/NOTES.md's corrected FakeContext section and
+# bugs/SPIKE-IMAGE-CLIPBOARD.md for what this was verified against.
+#
 # -source/-target rather than --release: --release pins the JDK platform API and
 # conflicts with compiling against android.jar. -Xlint:-options silences the
 # expected "bootstrap class path not set" note.
 & $javac -source 17 -target 17 -Xlint:-options -nowarn `
-    -cp $androidJar -d $classDir (Join-Path $srcDir "ClipBridge.java")
+    -cp $androidJar -d $classDir `
+    (Join-Path $srcDir "ClipBridge.java") `
+    (Join-Path $srcDir "android\content\IContentProvider.java")
 if ($LASTEXITCODE -ne 0) { throw "javac failed ($LASTEXITCODE)" }
 
 # --- dex -----------------------------------------------------------------

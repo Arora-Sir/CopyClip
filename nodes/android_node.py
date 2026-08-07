@@ -5,10 +5,17 @@ reconnect supervisor. That independence is the point: with three devices, the ph
 rebooting or the tablet dropping off Wi-Fi must not stall anything else. Each node fails,
 backs off and recovers entirely on its own.
 
-Protocol spoken (unchanged from v1, plus DESC):
+Protocol spoken (unchanged from v1 for text, plus DESC and the chunked image verbs):
     in : READY <sdk> | CLIP <mime> <sens> <b64> | SKIP <mime> <why>
          ACK <verb> | DEFER <verb> <why> | LOCK <0|1> | DESC <mime> <sens> <ts> | ERR <msg>
+         CLIPB <id> <mime> <sens> <sha256> <bytes> <nchunks> | CLIPC <id> <idx> <b64chunk>
     out: SET <b64> | GET | DESC | PING | QUIT
+         SETB <id> <mime> <sha256> <bytes> <nchunks> | SETC <id> <idx> <b64chunk>
+
+Images use SETB/SETC and CLIPB/CLIPC instead of SET/CLIP because a multi-megabyte payload
+as one line would block the pump thread and starve PING/LOCK frames; text's single-line SET
+path is untouched. See the image-sync implementation plan, section 5, for the full framing
+rationale.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ import logging
 import queue
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Callable
 
 from core.models import ClipDescriptor, ClipPayload, WriteResult
@@ -28,11 +36,44 @@ log = logging.getLogger("copyclip.node.android")
 
 TransportFactory = Callable[[], object]
 
+# Raw bytes per chunk. ~64 KiB after base64, comfortably under any line-length limit on
+# either transport (adb shell pipe or the TCP/Termux tier).
+CHUNK_BYTES = 48 * 1024
+
+# Device ACKs every ACK_WINDOW chunks during a chunked write ("ACK setc <id> <idx>"), which
+# resets the stall-detection deadline. This is what keeps ack_timeout_s's "no answer in N
+# seconds means the channel is dead" guarantee meaningful at any payload size -- without
+# it, a multi-megabyte image would only get one confirmation opportunity at the very end,
+# and a channel that died halfway through would not be noticed until the whole (pointless)
+# transfer finished sending.
+ACK_WINDOW = 8
+
+# How long an inbound chunked transfer can sit half-assembled with no further chunks
+# arriving before it is dropped. Generous relative to ACK_WINDOW-paced transfers on a
+# healthy link; exists only to bound memory/state from an abandoned transfer, since a
+# fresh CLIPB for the same node already discards any in-progress one immediately.
+_INBOUND_STALE_S = 30.0
+
+
+@dataclass
+class _InboundTransfer:
+    """Reassembly state for one device-initiated chunked image (CLIPB/CLIPC)."""
+
+    transfer_id: str
+    mime: str
+    sensitive: bool
+    sha256: str
+    total_bytes: int
+    nchunks: int
+    started_at: float = field(default_factory=time.time)
+    chunks: list = field(default_factory=list)
+
 
 class AndroidNode(ClipboardNode):
     def __init__(self, name: str, transport_factory: TransportFactory, *,
                  reconnect_min_s: float = 1.0, reconnect_max_s: float = 30.0,
                  idle_ping_s: float = 60.0, ack_timeout_s: float = 4.0,
+                 max_image_bytes: int = 25_165_824, image_chunk_bytes: int = CHUNK_BYTES,
                  on_connect: Callable[["AndroidNode"], None] | None = None,
                  on_lock_change: Callable[["AndroidNode", bool], None] | None = None) -> None:
         super().__init__(name)
@@ -41,6 +82,8 @@ class AndroidNode(ClipboardNode):
         self.reconnect_max_s = reconnect_max_s
         self.idle_ping_s = idle_ping_s
         self.ack_timeout_s = ack_timeout_s
+        self.max_image_bytes = max_image_bytes
+        self.image_chunk_bytes = image_chunk_bytes
         self._on_connect = on_connect
         self._on_lock_change = on_lock_change
 
@@ -58,6 +101,14 @@ class AndroidNode(ClipboardNode):
         # is sufficient.
         self._ack_event = threading.Event()
         self._ack_verb: str | None = None
+        # Set on every "ACK setc <id> <idx>" during a chunked write -- a periodic liveness
+        # signal distinct from _ack_event's final-confirmation role (see write()/ _handle()).
+        self._chunk_ack_event = threading.Event()
+        self._transfer_seq = 0
+        # Reassembly state for an in-progress device-initiated image (single slot: only one
+        # inbound image transfer at a time per node, matching the outbox's single-slot
+        # design for the same reason -- there is never a backlog worth keeping).
+        self._inbound_transfer: _InboundTransfer | None = None
 
     # -- state -------------------------------------------------------------
 
@@ -161,6 +212,11 @@ class AndroidNode(ClipboardNode):
                 elif idle > self.idle_ping_s + 30:
                     log.warning("[%s] no PING response; treating channel as dead", self.name)
                     return
+                t = self._inbound_transfer
+                if t is not None and time.time() - t.started_at > _INBOUND_STALE_S:
+                    log.warning("[%s] abandoned inbound image transfer %s (%d/%d chunks); "
+                                "dropping", self.name, t.transfer_id, len(t.chunks), t.nchunks)
+                    self._inbound_transfer = None
                 continue
 
             last_seen = time.time()
@@ -207,6 +263,60 @@ class AndroidNode(ClipboardNode):
                 return
             self._emit_desc(descriptor)
 
+        elif verb == "CLIPB":
+            # "CLIPB <id> <mime> <sens> <sha256> <bytes> <nchunks>" -- header for a
+            # device-initiated chunked image. A fresh id always discards any transfer
+            # already in progress: there is never a backlog worth keeping (same reasoning
+            # as the outbox's single-slot design).
+            parts = line.split(" ")
+            if len(parts) < 7:
+                log.warning("[%s] malformed CLIPB", self.name)
+                return
+            _, transfer_id, mime, sensitive, sha, size_s, nchunks_s = parts
+            try:
+                size, nchunks = int(size_s), int(nchunks_s)
+            except ValueError:
+                log.warning("[%s] unparseable CLIPB: %s", self.name, line[:80])
+                return
+            if size > self.max_image_bytes:
+                log.warning("[%s] CLIPB %s rejected before buffering: %d bytes > cap %d",
+                            self.name, transfer_id, size, self.max_image_bytes)
+                self._inbound_transfer = None
+                return
+            if self._inbound_transfer is not None:
+                log.info("[%s] new image transfer %s supersedes in-progress %s",
+                         self.name, transfer_id, self._inbound_transfer.transfer_id)
+            self._inbound_transfer = _InboundTransfer(
+                transfer_id=transfer_id, mime=mime, sensitive=sensitive == "1",
+                sha256=sha, total_bytes=size, nchunks=nchunks)
+
+        elif verb == "CLIPC":
+            # "CLIPC <id> <idx> <b64chunk>"
+            parts = line.split(" ", 3)
+            if len(parts) < 4:
+                log.warning("[%s] malformed CLIPC", self.name)
+                return
+            _, transfer_id, idx_s, chunk_b64 = parts
+            t = self._inbound_transfer
+            if t is None or t.transfer_id != transfer_id:
+                log.debug("[%s] CLIPC for unknown/superseded transfer %s, ignoring",
+                          self.name, transfer_id)
+                return
+            try:
+                idx = int(idx_s)
+            except ValueError:
+                log.warning("[%s] unparseable CLIPC index", self.name)
+                return
+            if idx != len(t.chunks):
+                log.warning("[%s] CLIPC gap in %s: expected chunk %d, got %d; aborting",
+                            self.name, transfer_id, len(t.chunks), idx)
+                self._inbound_transfer = None
+                return
+            t.chunks.append(chunk_b64)
+            if len(t.chunks) == t.nchunks:
+                self._finish_inbound_transfer(t)
+                self._inbound_transfer = None
+
         elif verb == "STAMP":
             # The clipboard changed but content was deliberately not read (standby mode, or
             # the change was our own write). Carries no hash, so it is only evidence that
@@ -239,14 +349,29 @@ class AndroidNode(ClipboardNode):
             log.debug("[%s] device skipped clip: %s", self.name, rest.strip())
 
         elif verb == "ERR":
-            log.warning("[%s] bridge error: %s", self.name, rest.strip())
+            reason = rest.strip()
+            if reason.startswith("chunk "):
+                # "ERR chunk <id> <reason>" -- the device aborted a chunked write it was
+                # receiving (hash mismatch, oversize, gap). No fast-path abort here: the
+                # in-flight write() loop's periodic ACK wait already fails within one
+                # ack_timeout_s window when no further "ACK setc" arrives, which is a
+                # bounded, correct outcome without adding more shared state to race on.
+                log.warning("[%s] device rejected chunked write: %s", self.name, reason)
+            else:
+                log.warning("[%s] bridge error: %s", self.name, reason)
 
         elif verb == "ACK":
             # Confirms a pending write() -- see the timeout-based fallback in write() for
             # why a write can no longer be assumed to have succeeded just because the local
             # pipe write didn't raise.
             acked_verb = rest.strip().split(" ", 1)[0]
-            if self._ack_verb is not None and acked_verb == self._ack_verb:
+            if acked_verb == "setc":
+                # "ACK setc <id> <idx>" -- periodic liveness ping during a chunked write.
+                # Resets write()'s stall-detection deadline; it is NOT the transfer's final
+                # confirmation, which arrives separately as a plain "ACK set" once the
+                # device has reassembled, verified and applied every chunk.
+                self._chunk_ack_event.set()
+            elif self._ack_verb is not None and acked_verb == self._ack_verb:
                 self._ack_event.set()
             log.debug("[%s] %s", self.name, line)
 
@@ -256,9 +381,32 @@ class AndroidNode(ClipboardNode):
         else:
             log.debug("[%s] unknown frame: %s", self.name, line[:80])
 
+    def _finish_inbound_transfer(self, t: _InboundTransfer) -> None:
+        try:
+            payload = ClipPayload.from_b64("".join(t.chunks), mime=t.mime, origin=self.name,
+                                           sensitive=t.sensitive)
+        except Exception:
+            log.exception("[%s] undecodable chunked image payload %s", self.name,
+                          t.transfer_id)
+            return
+        # sha256 is verified against the reassembled bytes before anything downstream ever
+        # sees this payload -- a gap or corruption fails closed rather than applying a
+        # truncated or garbled image.
+        if payload.sha256 != t.sha256:
+            log.warning("[%s] chunked image %s failed sha256 verification "
+                        "(expected %s..., got %s...); dropping", self.name, t.transfer_id,
+                        t.sha256[:12], payload.sha256[:12])
+            return
+        log.debug("[%s] reassembled chunked image %s (%d bytes, %d chunks)",
+                 self.name, t.transfer_id, payload.size, t.nchunks)
+        self._emit(payload)
+
     # -- io ----------------------------------------------------------------
 
     def write(self, payload: ClipPayload) -> str:
+        if payload.is_image:
+            return self._write_chunked(payload)
+
         if payload.text is None:
             return WriteResult.REJECTED
         with self._lock:
@@ -290,6 +438,58 @@ class AndroidNode(ClipboardNode):
 
         # ClipBridge answers DEFER rather than ACK when the keyguard is up, and replays it
         # itself on unlock, so a locked device is reported honestly instead of as success.
+        return WriteResult.DEFERRED if self._locked else WriteResult.OK
+
+    def _write_chunked(self, payload: ClipPayload) -> str:
+        """Image write path: SETB header + SETC chunks. Text's single-line SET path above
+        is completely untouched by this -- it is a parallel code path, not a shared one.
+        """
+        with self._lock:
+            transport = self._transport
+        if transport is None or not self._connected:
+            return WriteResult.UNAVAILABLE
+
+        b64 = payload.to_b64()
+        chunk_chars = ((self.image_chunk_bytes + 2) // 3) * 4  # base64 chars per raw chunk
+        chunks = [b64[i:i + chunk_chars] for i in range(0, len(b64), chunk_chars)] or [""]
+        self._transfer_seq += 1
+        transfer_id = f"{self.name}-{self._transfer_seq}"
+
+        self._ack_event.clear()
+        self._ack_verb = "set"
+        try:
+            transport.send_line(
+                f"SETB {transfer_id} {payload.mime} {payload.sha256} "
+                f"{payload.size} {len(chunks)}")
+            for idx, chunk in enumerate(chunks):
+                # A periodic wait, not one at the very end: without this, a channel that
+                # died partway through a multi-megabyte image would only be noticed after
+                # the whole (pointless) transfer finished sending, instead of within
+                # ack_timeout_s like every other write.
+                if idx > 0 and idx % ACK_WINDOW == 0:
+                    if not self._chunk_ack_event.wait(timeout=self.ack_timeout_s):
+                        log.warning(
+                            "[%s] no chunk ACK within %.1fs at chunk %d/%d; "
+                            "treating channel as dead", self.name, self.ack_timeout_s,
+                            idx, len(chunks))
+                        transport.mark_dead()
+                        self._ack_verb = None
+                        return WriteResult.FAILED
+                    self._chunk_ack_event.clear()
+                transport.send_line(f"SETC {transfer_id} {idx} {chunk}")
+        except TransportError as exc:
+            log.warning("[%s] chunked write failed: %s", self.name, exc)
+            self._ack_verb = None
+            return WriteResult.FAILED
+
+        confirmed = self._ack_event.wait(timeout=self.ack_timeout_s)
+        self._ack_verb = None
+        if not confirmed:
+            log.warning("[%s] no final ACK/DEFER for image SET within %.1fs; "
+                        "treating channel as dead", self.name, self.ack_timeout_s)
+            transport.mark_dead()
+            return WriteResult.FAILED
+
         return WriteResult.DEFERRED if self._locked else WriteResult.OK
 
     def request_refresh(self) -> None:

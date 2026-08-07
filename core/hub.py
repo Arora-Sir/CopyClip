@@ -141,11 +141,12 @@ class Hub:
                 log.info("skip clip from %s: flagged sensitive by the source app", desc.node)
                 return
 
-            if desc.char_len > self.policy.max_chars:
+            size_cap = self.policy.max_image_bytes if desc.is_image else self.policy.max_chars
+            if desc.char_len > size_cap:
                 # Reject on the announcement, before paying to transfer it at all.
                 self.stats["skipped"] += 1
                 log.info("skip clip from %s: too large (%d > %d), body not fetched",
-                         desc.node, desc.char_len, self.policy.max_chars)
+                         desc.node, desc.char_len, size_cap)
                 return
 
             node = self.nodes.get(desc.node)

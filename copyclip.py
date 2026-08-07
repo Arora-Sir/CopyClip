@@ -54,6 +54,10 @@ DEFAULT_CONFIG = {
     "denylist_regex": [],
     "allow_non_text": False,
 
+    "allow_images": False,
+    "max_image_bytes": 25_165_824,
+    "image_chunk_bytes": 49_152,
+
     "adopt_on_connect": False,
     "dedup_ttl_s": 90.0,
     "reconnect_min_s": 1.0,
@@ -178,6 +182,8 @@ def build_hub(cfg: dict) -> Hub:
             reconnect_max_s=cfg["reconnect_max_s"],
             idle_ping_s=cfg["idle_ping_s"],
             ack_timeout_s=cfg["ack_timeout_s"],
+            max_image_bytes=cfg["max_image_bytes"],
+            image_chunk_bytes=cfg["image_chunk_bytes"],
             on_connect=on_connect,
             on_lock_change=on_lock_change,
         )
@@ -200,7 +206,9 @@ def build_hub(cfg: dict) -> Hub:
         domains=domains,
         policy=Policy(max_chars=cfg["max_chars"],
                       denylist_regex=cfg["denylist_regex"],
-                      allow_non_text=cfg["allow_non_text"]),
+                      allow_non_text=cfg["allow_non_text"],
+                      allow_images=cfg["allow_images"],
+                      max_image_bytes=cfg["max_image_bytes"]),
         outbox=Outbox(os.path.join(HERE, cfg["state_dir"], "outbox.json")),
         dedup=RecentClips(ttl=cfg["dedup_ttl_s"]),
         adopt_on_connect=cfg.get("adopt_on_connect", False),

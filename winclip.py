@@ -12,12 +12,16 @@ import threading
 import time
 from ctypes import wintypes
 
+import winimage
+
 log = logging.getLogger("copyclip.win")
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 CF_UNICODETEXT = 13
+CF_DIB = 8
+CF_DIBV5 = 17
 GMEM_MOVEABLE = 0x0002
 WM_CLIPBOARDUPDATE = 0x031D
 WM_DESTROY = 0x0002
@@ -57,6 +61,12 @@ user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
 user32.AddClipboardFormatListener.argtypes = [wintypes.HWND]
 user32.AddClipboardFormatListener.restype = wintypes.BOOL
 user32.RemoveClipboardFormatListener.argtypes = [wintypes.HWND]
+user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+user32.RegisterClipboardFormatW.restype = wintypes.UINT
+user32.EnumClipboardFormats.argtypes = [wintypes.UINT]
+user32.EnumClipboardFormats.restype = wintypes.UINT
+user32.GetClipboardFormatNameW.argtypes = [wintypes.UINT, wintypes.LPWSTR, ctypes.c_int]
+user32.GetClipboardFormatNameW.restype = ctypes.c_int
 
 # Declaring these is load-bearing, not tidiness. Without argtypes, ctypes marshals
 # arguments as C int; LPARAM and HWND are pointer-sized on 64-bit, so any message
@@ -119,6 +129,22 @@ _ACCESS_LOCK = threading.RLock()
 # real HWND is the documented-correct form: with a NULL owner, EmptyClipboard sets the
 # clipboard owner to NULL, which MSDN notes can make subsequent calls fail.
 _owner_hwnd = None
+
+# Registered clipboard formats for pass-through image bytes. Registered once at import;
+# RegisterClipboardFormatW is idempotent and returns the same id on every call once a name
+# is registered process-wide, so this is safe to call unconditionally. "JFIF" and "GIF" are
+# the actual names Windows and other apps (browsers, Office, Paint) use for these -- not
+# invented here.
+CF_PNG = user32.RegisterClipboardFormatW("PNG")
+CF_JFIF = user32.RegisterClipboardFormatW("JFIF")
+CF_GIF = user32.RegisterClipboardFormatW("GIF")
+
+_REGISTERED_MIME = {
+    CF_PNG: "image/png",
+    CF_JFIF: "image/jpeg",
+    CF_GIF: "image/gif",
+}
+_MIME_REGISTERED = {v: k for k, v in _REGISTERED_MIME.items()}
 
 
 class _Opened:
@@ -188,40 +214,100 @@ def read_text() -> str | None:
             kernel32.GlobalUnlock(handle)
 
 
-def _write_once(data: bytes) -> None:
-    """One open-empty-alloc-set-close cycle. Raises on any failure."""
+def _read_global(fmt: int) -> bytes | None:
+    handle = user32.GetClipboardData(fmt)
+    if not handle:
+        return None
+    ptr = kernel32.GlobalLock(handle)
+    if not ptr:
+        return None
+    try:
+        size = kernel32.GlobalSize(handle)
+        if not size:
+            return None
+        return ctypes.string_at(ptr, size)
+    finally:
+        kernel32.GlobalUnlock(handle)
+
+
+def read_image() -> tuple[bytes, str] | None:
+    """Current clipboard image as (bytes, mime), or None when it holds no image.
+
+    Preference order: a registered pass-through format (PNG/JFIF/GIF) first, because that
+    is the *original* encoded bytes exactly as whatever app put them there -- lossless,
+    no re-encode, no bloat. Only falls back to CF_DIBV5/CF_DIB (converted to PNG via
+    winimage) when no registered format is present, which happens for apps that only ever
+    set the DIB formats (e.g. a plain screenshot tool, or MS Paint on some versions).
+
+    Caller (nodes/windows_node.py) checks CF_UNICODETEXT first and only calls this when
+    that returns None, so a text clip carrying an incidental image format is never
+    misread as an image.
+    """
+    with _Opened():
+        for fmt, mime in _REGISTERED_MIME.items():
+            if fmt and user32.IsClipboardFormatAvailable(fmt):
+                data = _read_global(fmt)
+                if data:
+                    return data, mime
+        if user32.IsClipboardFormatAvailable(CF_DIBV5):
+            dib = _read_global(CF_DIBV5)
+            if dib:
+                try:
+                    return winimage.dib_to_png(dib), "image/png"
+                except winimage.ImageDecodeError as exc:
+                    log.warning("CF_DIBV5 present but unreadable: %s", exc)
+        if user32.IsClipboardFormatAvailable(CF_DIB):
+            dib = _read_global(CF_DIB)
+            if dib:
+                try:
+                    return winimage.dib_to_png(dib), "image/png"
+                except winimage.ImageDecodeError as exc:
+                    log.warning("CF_DIB present but unreadable: %s", exc)
+        return None
+
+
+def _global_from_bytes(data: bytes) -> wintypes.HGLOBAL:
+    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+    if not handle:
+        raise MemoryError("GlobalAlloc failed")
+    ptr = kernel32.GlobalLock(handle)
+    if not ptr:
+        kernel32.GlobalFree(handle)
+        raise MemoryError("GlobalLock failed")
+    ctypes.memmove(ptr, data, len(data))
+    kernel32.GlobalUnlock(handle)
+    return handle
+
+
+def _write_once(items: list[tuple[int, bytes]]) -> None:
+    """One open-empty-alloc-set(-set...)-close cycle. Raises on any failure.
+
+    Accepts multiple (format_id, data) pairs so several formats can be set for one
+    clipboard ownership -- e.g. CF_DIBV5 plus a registered pass-through format for one
+    image -- in a single atomic-looking operation, exactly as write_text() already does
+    for its single CF_UNICODETEXT item.
+    """
     with _Opened():
         if not user32.EmptyClipboard():
             raise OSError(f"EmptyClipboard failed (err={ctypes.get_last_error()})")
-        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
-        if not handle:
-            raise MemoryError("GlobalAlloc failed")
-        ptr = kernel32.GlobalLock(handle)
-        if not ptr:
-            kernel32.GlobalFree(handle)
-            raise MemoryError("GlobalLock failed")
-        ctypes.memmove(ptr, data, len(data))
-        kernel32.GlobalUnlock(handle)
-        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
-            # Ownership only transfers to the system on success; free it ourselves otherwise.
-            kernel32.GlobalFree(handle)
-            raise OSError(f"SetClipboardData failed (err={ctypes.get_last_error()})")
+        for fmt, data in items:
+            handle = _global_from_bytes(data)
+            if not user32.SetClipboardData(fmt, handle):
+                # Ownership only transfers to the system on success; free it ourselves.
+                kernel32.GlobalFree(handle)
+                raise OSError(f"SetClipboardData({fmt}) failed (err={ctypes.get_last_error()})")
 
 
-def write_text(text: str, attempts: int = 4) -> None:
-    """Replace the clipboard with `text`.
-
-    Retries the **whole** sequence, not just the open. Previously only OpenClipboard was
+def _write_retrying(items: list[tuple[int, bytes]], attempts: int) -> None:
+    """Retries the **whole** sequence, not just the open. Previously only OpenClipboard was
     retried, so a mid-sequence failure (observed: EmptyClipboard returning
     ERROR_CLIPBOARD_NOT_OPEN after a successful open) abandoned the write outright and the
     clip was lost.
     """
-    data = text.encode("utf-16-le") + b"\x00\x00"
     last: Exception | None = None
-
     for i in range(attempts):
         try:
-            _write_once(data)
+            _write_once(items)
             return
         except (OSError, ClipboardBusy) as exc:
             last = exc
@@ -231,8 +317,35 @@ def write_text(text: str, attempts: int = 4) -> None:
             log.warning("clipboard write attempt %d/%d failed (%s); retrying",
                         i + 1, attempts, exc)
             time.sleep(0.05 * (i + 1))
-
     raise OSError(f"clipboard write failed after {attempts} attempts: {last}")
+
+
+def write_text(text: str, attempts: int = 4) -> None:
+    """Replace the clipboard with `text`."""
+    data = text.encode("utf-16-le") + b"\x00\x00"
+    _write_retrying([(CF_UNICODETEXT, data)], attempts)
+
+
+def write_image(data: bytes, mime: str, attempts: int = 4) -> None:
+    """Replace the clipboard with an image, encoded as `data`/`mime`.
+
+    Sets, in one open/empty/close cycle: CF_DIBV5 (decoded via winimage, alpha
+    preserved) so *any* app that only understands the DIB formats can paste it, plus
+    the original bytes under the matching registered format (PNG/JFIF/GIF) when one
+    exists, for a byte-identical, no-re-encode round trip in apps that prefer it.
+
+    Raises winimage.ImageDecodeError if `data` cannot be decoded (corrupt bytes, or a
+    format WIC has no codec for) -- callers must treat that as a failed write, not crash.
+    """
+    bgra, width, height = winimage.decode(data)
+    dibv5 = winimage.png_to_dibv5(bgra, width, height)
+
+    items: list[tuple[int, bytes]] = [(CF_DIBV5, dibv5)]
+    registered_fmt = _MIME_REGISTERED.get(mime)
+    if registered_fmt:
+        items.append((registered_fmt, data))
+
+    _write_retrying(items, attempts)
 
 
 class ClipboardWatcher:

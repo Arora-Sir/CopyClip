@@ -15,6 +15,12 @@ from dataclasses import dataclass, field
 
 TEXT_MIMES = ("text/plain", "text/html")
 
+# Pass-through image MIMEs: these travel byte-identical, original encoding preserved, no
+# transcode. heic/heif/avif and anything else land outside this set and get transcoded to
+# image/png at the point of capture (nodes/windows_node.py, android/ClipBridge.java) --
+# Windows cannot reliably decode those, so they never reach this list as-is.
+IMAGE_MIMES = ("image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp")
+
 
 @dataclass(frozen=True)
 class ClipPayload:
@@ -52,6 +58,10 @@ class ClipPayload:
     @property
     def is_text(self) -> bool:
         return self.mime in TEXT_MIMES
+
+    @property
+    def is_image(self) -> bool:
+        return self.mime in IMAGE_MIMES
 
     @property
     def text(self) -> str | None:
@@ -130,6 +140,10 @@ class ClipDescriptor:
     @property
     def short(self) -> str:
         return self.sha256[:12]
+
+    @property
+    def is_image(self) -> bool:
+        return self.mime in IMAGE_MIMES
 
 
 class WriteResult:
