@@ -132,7 +132,8 @@ being falsely marked "delivered" and later either lost or delivered stale.
 | [core/policy.py](core/policy.py) | Size cap, denylist regex, and sensitive-clip filtering (skips anything a source app flagged with Android's `EXTRA_IS_SENSITIVE`, e.g. a password manager). |
 | [core/models.py](core/models.py) | `ClipPayload`/`ClipDescriptor` — the shared data shapes; `WriteResult` — the outcome enum every node's `write()` returns. |
 | [nodes/base.py](nodes/base.py) | `ClipboardNode`, the abstract contract the hub actually depends on. |
-| [nodes/windows_node.py](nodes/windows_node.py) | The laptop as a node. Thin wrapper over [winclip.py](winclip.py) (raw ctypes, no pywin32). |
+| [nodes/windows_node.py](nodes/windows_node.py) | The laptop as a node. Thin wrapper over [winclip.py](winclip.py) (raw ctypes, no pywin32) and [winimage.py](winimage.py) (image codec, §6.6a). |
+| [winimage.py](winimage.py) | PNG encode (hand-rolled, deterministic), WIC-backed decode (arbitrary formats), DIB↔PNG conversion. No third-party deps. |
 | [nodes/android_node.py](nodes/android_node.py) | A phone or tablet as a node. Owns its own connect/reconnect supervisor and speaks the ClipBridge wire protocol (§5). |
 | [domains/sync_domain.py](domains/sync_domain.py) | `SyncDomain` — the phone+tablet grouping. Elects a representative, tracks whether Samsung Continuity is actually propagating (healthy vs degraded), and decides who gets written to for one clip. |
 | [transports/adb_transport.py](transports/adb_transport.py) | Tier 1: a persistent `adb shell` pipe. Works with zero phone-side setup; doesn't survive a phone reboot (wireless ADB isn't `persist`ed). |
@@ -165,6 +166,18 @@ One line per frame, `\n`-terminated, base64 for any payload. Defined authoritati
 | device → laptop | `SKIP <mime> <why>` | Something was deliberately not read/sent. |
 | device → laptop | `PONG` | Answers `PING`. |
 | device → laptop | `ERR <message>` | Something went wrong on the device side. |
+| laptop → device | `SETB <id> <mime> <sha256> <bytes> <nchunks>` | Header for a chunked image write. |
+| laptop → device | `SETC <id> <idx> <b64chunk>` | One chunk of an image write. |
+| device → laptop | `CLIPB <id> <mime> <sens> <sha256> <bytes> <nchunks>` | Header for a chunked image announcement (in response to `GET`). |
+| device → laptop | `CLIPC <id> <idx> <b64chunk>` | One chunk of an image body. |
+| device → laptop | `ACK setc <id> <idx>` | Periodic liveness ping during a chunked write, distinct from the transfer's final `ACK set`. |
+| device → laptop | `ERR chunk <id> <reason>` | The device aborted a chunked write it was receiving (hash mismatch, oversize, gap). |
+
+Images use `SETB`/`SETC`/`CLIPB`/`CLIPC` instead of the single-line `SET`/`CLIP` verbs because
+a multi-megabyte payload as one line would block the pump/reader thread and starve
+`PING`/`LOCK` frames — see §6.7a. Text's `SET`/`CLIP`/`GET`/`DESC` framing above is completely
+unmodified by any of this; `GET` is reused unchanged, and the device decides whether to
+answer with `CLIP` (text) or `CLIPB`+`CLIPC`×N (image).
 
 ---
 
@@ -233,6 +246,80 @@ falls back to writing every reachable member directly — because at that point 
 relaying on its behalf. It recovers back to "healthy" the moment a confirmation succeeds
 again.
 
+### 6.6a Image clipboard: MediaStore under app_process, and why it needed FakeContext
+
+Writing an image to the Android clipboard needs a real `content://` URI backing a
+`ClipData.Item` — a `file://` URI throws `FileUriExposedException`, and minting a
+`content://` URI needs a working `ContentResolver`. Under `app_process` (no installed app,
+no manifest, no `Context` in the normal sense), that resolver does not exist by default.
+
+The fix, ported from `otherCopyProjects/scrcpy`'s `FakeContext`/`Workarounds` classes and
+scoped **narrowly** to this one purpose: a hand-built `ActivityThread` gives access to the
+system `Context`, and a `ContextWrapper` subclass overrides `getContentResolver()` to route
+provider access through `ActivityManager.getContentProviderExternal(...)` — the same binder
+call Shizuku's own shell-UID service uses. Text's `setPrimaryClip`/`getPrimaryClip` are
+**not** touched by any of this; they stay on the proven reflective `IClipboard` binder path
+that was already working. If `FakeContext` fails to initialize for any reason, imaging is
+disabled and text sync is completely unaffected — see `ClipBridge.java`'s `initImaging()`.
+
+This was measured, not assumed, before being built: see
+[bugs/SPIKE-IMAGE-CLIPBOARD.md](bugs/SPIKE-IMAGE-CLIPBOARD.md) for the device spike that
+proved the mechanism on the real S24 Ultra, including two real bugs found in a naive port
+of scrcpy's code (a missing `Looper.prepareMainLooper()`, and `acquireUnstableProvider`
+needing to actually delegate rather than return `null`, which scrcpy itself never needed
+because it never does file I/O through this resolver). Both fixes are in `ClipBridge.java`.
+
+**Format handling:** PNG, JPEG, GIF, BMP and WEBP travel byte-for-byte, original encoding
+preserved — no re-encode, no bloat on a photo. Only HEIC/HEIF/AVIF/unknown formats are
+transcoded to PNG (via `BitmapFactory`/`Bitmap.compress` on the device, or WIC on the
+laptop), because Windows cannot reliably decode those directly.
+
+**Storage:** images write to `Pictures/CopyClip` via `MediaStore.Images.Media.insert`, with
+history kept (no auto-delete). Any app with `READ_MEDIA_IMAGES` can paste the result —
+maximum compatibility, at the cost of the album being visible in Gallery.
+
+**Windows side:** `winimage.py` hand-rolls a deterministic PNG encoder (fixed zlib level,
+filter type 0 per scanline — determinism is load-bearing for own-write echo suppression, not
+a style choice) and decodes arbitrary formats via WIC (Windows Imaging Component) over raw
+COM/ctypes, with every GUID and struct layout verified against the installed Windows SDK
+headers rather than recalled from memory. `winclip.py` sets `CF_DIBV5` (alpha preserved, via
+an explicit `BI_BITFIELDS` alpha mask — the ClipCascade prior-art bug of destroying alpha
+with `.convert("RGB")` is deliberately not repeated) alongside the original bytes under a
+registered format (`"PNG"`/`"JFIF"`/`"GIF"`) when one applies, in one clipboard-ownership
+cycle, so both the pass-through-preferring apps and the DIB-only apps can paste it.
+
+**What's still open:** reading a clip URI minted by a *different* app's content provider
+(not CopyClip's own `MediaStore` row), and a live visual paste confirmation into arbitrary
+third-party apps, were not verified during the spike — see
+[bugs/SPIKE-IMAGE-CLIPBOARD.md](bugs/SPIKE-IMAGE-CLIPBOARD.md)'s Q5/Q7. `allow_images`
+defaults to `false` in `config.json` pending real-use confirmation, matching this project's
+existing convention for BUG-001 through BUG-003.
+
+### 6.7a Chunked framing for images
+
+A 24 MiB image is roughly 32 MiB of base64 — far too large for the single-line `SET`/`CLIP`
+framing text uses, which would block the pump/reader thread for the whole transfer and
+starve `PING`/`LOCK` frames. Images use `SETB`+`SETC`×N (laptop → device) and
+`CLIPB`+`CLIPC`×N (device → laptop) instead (§5), with the device ACKing every 8 chunks
+(`ACK setc <id> <idx>`) so `ack_timeout_s`'s "no answer in N seconds means the channel is
+dead" guarantee (§6.3) stays meaningful at any payload size — without this, a channel that
+died halfway through a multi-megabyte transfer would only be noticed after the whole
+(pointless) send finished, not within the normal detection window.
+
+Chunking operates on the **base64 string**, not the raw bytes — ASCII by construction, so
+it is structurally immune to the mid-codepoint UTF-8 corruption bug found in ClipCascade's
+own chunker during prior-art research (fixed-offset byte slicing decoded with
+`errors="ignore"`, silently dropping partial multi-byte characters). The reassembled bytes
+are verified against the header's `sha256` before anything downstream ever sees the payload
+— a gap, a dropped chunk, or corruption fails closed rather than applying a truncated image.
+
+The outbox (§6.4) cannot inline a queued image the way it does text: a queued 24 MiB image
+base64'd into JSON would mean a ~32 MiB `fsync` on every retry tick. Image payloads instead
+write a single-file-per-key sidecar (`state/outbox/<key>.bin`, overwritten in place) with
+only `{mime, sha256, sidecar: true}` in `outbox.json`; on load, a missing or
+hash-mismatched sidecar drops that entry rather than serving stale or corrupt bytes. Text
+payloads are completely unaffected — still fully inline, exactly as before.
+
 ### 6.6 ClipBridge idle-orphan safeguard
 
 A subtler gap, found by testing: when Tailscale drops on the phone, `ClipBridge` doesn't
@@ -282,6 +369,9 @@ reason — changing one is a real tradeoff, not a free lunch.
 | `IDLE_ORPHAN_MS` | 100,000 (hardcoded in `android/ClipBridge.java`) | How long `ClipBridge` can go without hearing from the laptop before suppressing content reads (§6.6) | Must stay comfortably above `idle_ping_s` + its grace window or a healthy-but-quiet connection will falsely trip it |
 | `grace_s` (per domain) | 8.0 | How long a Continuity confirmation probe is given before counting as a miss (§6.5) | Above Samsung's measured ~2.5s relay by a wide margin |
 | `fail_threshold` (per domain) | 3 | Consecutive missed confirmations before a domain is marked degraded (§6.5) | Lower = faster fallback to direct writes, more sensitive to one-off blips |
+| `allow_images` | `false` | Whether image clips sync at all (§6.6a) | Defaults off pending real-use confirmation of bugs/SPIKE-IMAGE-CLIPBOARD.md's open Q5/Q7; flip once confirmed |
+| `max_image_bytes` | 25,165,824 (24 MiB) | Oversize images are **skipped and logged**, never truncated — enforced independently on the laptop (`core/policy.py`) and on each device (`ClipBridge.java`'s own `MAX_IMAGE_BYTES`) | Higher = larger screenshots sync, more memory pressure per transfer on both ends |
+| `image_chunk_bytes` | 49,152 (48 KiB) | Raw bytes per chunk in the `SETB`/`SETC` framing (§6.7a) | Smaller = more `ACK setc` round trips, faster stall detection on a shaky link; larger = fewer round trips, coarser stall detection |
 
 ---
 
@@ -350,30 +440,19 @@ This section exists so a future session doesn't have to rediscover the plan from
 it was already researched when the wire protocol and payload model were designed, even
 though only text sync got built for v1.0.0.
 
-### Images
+### Images — built, `allow_images` currently off pending confirmation
 
-**What's already in place for this, right now, with zero further work:** `ClipPayload`
-(`core/models.py`) already stores an arbitrary `mime: str` plus `data: bytes` — text is
-just `mime="text/plain"` under the hood, not a hardcoded assumption. `Policy.reject_reason()`
-(`core/policy.py`) already has an `allow_non_text` flag (`config.json`'s `allow_non_text`,
-currently `false`) gating exactly this — flipping it is the *policy* half of turning images
-on. The wire protocol (§5) already carries a MIME field on every `CLIP`/`DESC` frame.
-`core/hub.py`, `core/dedup.py`, and `core/outbox.py` would not need to change at all — they
-already operate on bytes + mime, never on text specifically.
+No longer future scope. Image clipboard sync (Windows ↔ Samsung, both directions) is
+implemented — see §6.6a (Android/MediaStore mechanics) and §6.7a (chunked framing, outbox
+sidecar). The pre-implementation device spike and its findings are in
+[bugs/SPIKE-IMAGE-CLIPBOARD.md](bugs/SPIKE-IMAGE-CLIPBOARD.md). `IMAGE_MIMES` in
+`core/models.py`, `winimage.py` (new), and the `SETB`/`SETC`/`CLIPB`/`CLIPC` wire verbs
+(§5) are the pieces that landed; text's existing code paths are untouched throughout.
 
-**What's genuinely missing, and the two real traps found during the original research:**
-- **Windows side** (`nodes/windows_node.py` / `winclip.py`): needs to read the clipboard's
-  `CF_DIB` bitmap format and convert it to a sensible encoding; `winclip.py` today only
-  handles `CF_UNICODETEXT`.
-- **Android side** (`android/ClipBridge.java`) — **the trap that catches most naive
-  implementations:** `ClipData.newUri()` cannot be given a `file://` URI — Android throws
-  `FileUriExposedException`. The correct path is a `MediaStore` **insert** first, to obtain
-  a real `content://` URI, and build the `ClipData` from that. This was confirmed by
-  research, not assumed.
-- `TEXT_MIMES` in `core/models.py` would need an image MIME added (e.g. `image/png`)
-  wherever "is this text" branches matter — `ClipPayload.is_text`/`.text`/`.char_len` all
-  assume a text/plain-or-html world today and would need an image case that skips the
-  character-decode path entirely.
+`allow_images` defaults to `false` in `config.json` because two sub-questions from the
+spike remain genuinely unverified in real use (reading a clip URI minted by a different
+app's provider; live visual paste confirmation across arbitrary third-party apps) — flip it
+once confirmed, matching this project's convention for BUG-001 through BUG-003.
 
 ### Files, via Taildrop handoff
 

@@ -39,16 +39,40 @@ clipboard service, use `com.android.shell` as the calling package.
 `com.android.shell`) and calls `getSystemService(CLIPBOARD_SERVICE)`, letting the framework
 absorb signature changes.
 
-**Not adopted, deliberately.** `FakeContext` needs hidden APIs absent from the stock SDK
-`android.jar`: `IContentProvider`, `AttributionSource`, and a subclassed `ContentResolver`.
-scrcpy compiles against a patched hidden-API jar to get them. CopyClip instead compiles
-against the stock `platforms/android-36/android.jar` and resolves everything reflectively
-at runtime, so `build_dex.ps1` works with nothing but the SDK already on this machine.
+**Correction (2026-08-06, image-sync research):** the paragraph originally here claimed
+`FakeContext` needs a patched hidden-API jar. **That is factually wrong** and was never
+checked against the source in this folder before now. `scrcpy/server/build.gradle:5` is
+`compileSdk = 36`, plain AGP, no hidden-API jar dependency.
+`scrcpy/server/build_without_gradle.sh:27` compiles with
+`$ANDROID_HOME/platforms/android-$PLATFORM/android.jar` -- **the exact same stock jar
+`build_dex.ps1` already uses.** The only hidden type `FakeContext` needs that is absent from
+that jar is `android.content.IContentProvider`, and scrcpy solves it with a hand-written
+5-line marker interface compiled alongside the real sources
+(`scrcpy/server/src/main/java/android/content/IContentProvider.java`, see
+`build_without_gradle.sh:55-58`, `# Fake sources to expose hidden Android types to the
+project`). At runtime the boot classloader supplies the real interface, so the anonymous
+`ContentResolver` subclass in `FakeContext` binds by dex descriptor.
+`AttributionSource`/`ContentResolver(Context)` need no stub at all -- both are stock public
+API.
+
+This was re-verified hands-on for image clipboard sync: `android/spike/ImageSpike.java`
+(see `bugs/SPIKE-IMAGE-CLIPBOARD.md`) compiles `FakeContext` plus the same 5-line stub
+against `platforms/android-36/android.jar` with the project's own `javac`/`d8` toolchain,
+with zero changes to `build_dex.ps1`'s SDK setup, and runs successfully as shell UID on the
+real S24 Ultra. Adopting `FakeContext` costs one stub file, not a toolchain change --
+**this is why image clipboard sync uses it** (scoped narrowly to obtaining a
+`ContentResolver`; the working `IClipboard`-over-binder text path below is left untouched).
+
+The trade-off below is still real and still the reason text sync stays on the reflective
+`IClipboard` path rather than migrating to `FakeContext.getSystemService(CLIPBOARD_SERVICE)`:
 
 Trade-off, stated plainly: scrcpy delegates version drift to the framework; CopyClip absorbs
 it in `ClipBridge.call()`, which enumerates overloads and fills parameters positionally by
-type. If a future Android breaks that, adopting `FakeContext` plus a hidden-API jar is the
-fallback.
+type. If a future Android breaks that, adopting `FakeContext`'s `getSystemService` route for
+the clipboard itself (not just imaging) is the fallback -- note it also requires porting the
+Samsung-specific `mContext` field rewrite for `CLIPBOARD_SERVICE` and `"semclipboard"`
+(`FakeContext.java:103-126`, scrcpy issues #6224/#6523), which the current binder-direct
+approach never needed.
 
 **Two failures worth stealing:**
 

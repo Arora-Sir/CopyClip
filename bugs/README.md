@@ -17,6 +17,11 @@ in real use, not merely when a test passes.
 - **[DEVICE-STATE.md](DEVICE-STATE.md)** — measured baseline of both devices: settings,
   package enabled-states, `appops` clipboard permissions, running cross-device services.
   Regenerate with `python tools\device_audit.py`. It is read-only and safe to run any time.
+- **[SPIKE-IMAGE-CLIPBOARD.md](SPIKE-IMAGE-CLIPBOARD.md)** — Phase 0 device spike for image
+  clipboard sync: proves `FakeContext` + `MediaStore` insert + `setPrimaryClip` works under
+  `app_process` as shell UID, with two real bugs found and fixed in the ported scrcpy code.
+  Two sub-questions (visual paste confirmation, reading a third-party app's clip URI) are
+  **OPEN, awaiting confirmation in real use**, same convention as the bugs below.
 
 ## Conventions
 

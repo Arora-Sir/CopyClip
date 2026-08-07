@@ -146,6 +146,17 @@ def audit(name: str, serial: str) -> list[str]:
 
     bridge = sh(serial, "ls -l /data/local/tmp/clipbridge.dex 2>/dev/null")
     L += [f"- ClipBridge on device: `{bridge or 'NOT PRESENT'}`", ""]
+
+    read_media = clipboard_op(serial, "com.android.shell").replace("READ_CLIPBOARD", "")
+    read_media_images = sh(serial, "appops get com.android.shell READ_MEDIA_IMAGES 2>/dev/null")
+    L += [f"- `com.android.shell READ_MEDIA_IMAGES`: `{read_media_images or 'n/a'}` "
+          f"(image clipboard reads the Pictures/CopyClip MediaStore row through this)", ""]
+
+    pictures = sh(serial, "ls -la /sdcard/Pictures/CopyClip/ 2>/dev/null")
+    if pictures and "No such file" not in pictures:
+        L += ["**Pictures/CopyClip contents**", "", "```", pictures, "```", ""]
+    else:
+        L += ["- `Pictures/CopyClip`: does not exist yet (created on first image sync)", ""]
     return L
 
 

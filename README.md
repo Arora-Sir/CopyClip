@@ -147,11 +147,12 @@ core/dedup.py           per-(hash, node) TTL map; prevents three-way echo storms
 core/outbox.py          durable single-slot queue, atomic writes
 core/policy.py          size cap, denylist, sensitive-clip filter
 nodes/base.py           ClipboardNode ABC: the only interface the hub knows
-nodes/windows_node.py   wraps winclip.py
+nodes/windows_node.py   wraps winclip.py + winimage.py
 nodes/android_node.py   ClipBridge protocol + its own reconnect supervisor
 domains/sync_domain.py  representative election + Continuity health
 transports/             adb (Tier 1) and TCP-to-Termux (Tier 2)
 winclip.py              Windows clipboard via raw ctypes, no pywin32
+winimage.py             image codec: hand-rolled PNG encode, WIC decode, DIB<->PNG
 android/ClipBridge.java on-device helper source, readable and rebuildable
 ```
 
@@ -173,6 +174,8 @@ script in this folder.
 | `dedup_ttl_s` | How long a clip is remembered. Longer than Samsung's ~2.5 s relay, short enough that deliberately re-copying works |
 | `denylist_regex` | Clips matching any pattern are never synced |
 | `ack_timeout_s` | How long a write waits for the device's real `ACK`/`DEFER` reply before being treated as failed. A successful local pipe write is not proof the device received it; this is what actually confirms delivery. See [ARCHITECTURE.md §6.3](ARCHITECTURE.md#63-ack-confirmed-writes) |
+| `allow_images` | Whether image clips sync at all. Defaults `false` pending real-use confirmation — see [ARCHITECTURE.md §6.6a](ARCHITECTURE.md#66a-image-clipboard-mediastore-under-app_process-and-why-it-needed-fakecontext) |
+| `max_image_bytes` | Oversized images are **skipped and logged**, never truncated — enforced on both the laptop and each device independently |
 
 Devices are addressed by **raw Tailscale IP, never MagicDNS**, which sidesteps NRPT
 resolution breaking.
@@ -245,16 +248,22 @@ double-click `Start CopyClip (Debug).bat` for the same thing without typing the 
 
 ---
 
+## Images
+
+Copy an image on any device, paste it on any other — same mechanism as text, off by default.
+`allow_images` in `config.json` is `false` until real-use confirmation of two open questions
+from the pre-implementation device spike (see
+[bugs/SPIKE-IMAGE-CLIPBOARD.md](bugs/SPIKE-IMAGE-CLIPBOARD.md) and
+[ARCHITECTURE.md §6.6a](ARCHITECTURE.md#66a-image-clipboard-mediastore-under-app_process-and-why-it-needed-fakecontext)).
+PNG/JPEG/GIF/BMP/WEBP travel byte-for-byte; only HEIC/HEIF/AVIF transcode to PNG. Images are
+stored on-device under `Pictures/CopyClip` via MediaStore, and capped at `max_image_bytes`
+(default 24 MiB), skipped and logged rather than truncated if oversized.
+
 ## Future scope
 
-Designed for, deliberately not built. The wire protocol already carries a MIME type and the
-payload model is bytes, so these land at the `nodes/` boundary without touching the hub. Full
-detail, including exactly which existing config flag and which files each of these would
-touch: [ARCHITECTURE.md §11](ARCHITECTURE.md#11-future-scope-designed-for-not-built).
+Designed for, deliberately not built. Full detail:
+[ARCHITECTURE.md §11](ARCHITECTURE.md#11-future-scope-designed-for-not-built).
 
-- **Images.** Windows `CF_DIB` to Android needs a MediaStore insert to obtain a `content://`
-  URI for `ClipData.newUri()`; a `file://` URI throws `FileUriExposedException`, which is the
-  trap most implementations fall into.
 - **Files** via Taildrop handoff.
 - **Clipboard history** with search.
 - **More devices**, by adding to a domain or creating another one. The hub does not change.
