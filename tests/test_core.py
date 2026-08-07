@@ -182,6 +182,80 @@ def test_outbox_put_skips_unchanged_reput():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_outbox_image_sidecar():
+    """Image payloads write a sidecar file (state/outbox/<key>.bin) instead of base64
+    inline in outbox.json -- a queued 24 MiB image inline would mean a ~32 MiB fsync on
+    every retry tick. Text payloads (tested above) are completely unaffected -- still
+    fully inline.
+    """
+    tmp = tempfile.mkdtemp(prefix="copyclip-outbox-sidecar-")
+    try:
+        path = os.path.join(tmp, "state", "outbox.json")
+        sidecar_dir = os.path.join(tmp, "state", "outbox")
+        data = bytes(range(256)) * 100
+
+        ob = Outbox(path)
+        image = ClipPayload(mime="image/png", data=data, origin="phone")
+        ob.put("domain:samsung", image)
+
+        import json as _json
+        with open(path, encoding="utf-8") as fh:
+            raw = _json.load(fh)
+        check("image entry marked as sidecar, no inline data_b64",
+              raw["domain:samsung"].get("sidecar") is True
+              and "data_b64" not in raw["domain:samsung"])
+        files = os.listdir(sidecar_dir)
+        check("exactly one sidecar file written", len(files) == 1, files)
+        with open(os.path.join(sidecar_dir, files[0]), "rb") as fh:
+            check("sidecar bytes match the original payload", fh.read() == data)
+
+        reloaded = Outbox(path)
+        restored = reloaded.peek("domain:samsung")
+        check("image payload restored across a simulated restart",
+              restored is not None and restored.data == data)
+
+        different = ClipPayload(mime="image/jpeg", data=data[::-1], origin="phone")
+        reloaded.put("domain:samsung", different)
+        check("same key overwrites the sidecar in place, not accumulated",
+              len(os.listdir(sidecar_dir)) == 1)
+
+        reloaded.clear("domain:samsung")
+        check("clear() prunes the sidecar file too",
+              len(os.listdir(sidecar_dir)) == 0 if os.path.isdir(sidecar_dir) else True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_outbox_sidecar_integrity():
+    """A missing or tampered sidecar must drop the stale entry rather than serve corrupt
+    or absent data -- reassembly failure fails closed, same principle as the chunked wire
+    protocol's sha256 verification.
+    """
+    tmp = tempfile.mkdtemp(prefix="copyclip-outbox-integrity-")
+    try:
+        path = os.path.join(tmp, "state", "outbox.json")
+        sidecar_dir = os.path.join(tmp, "state", "outbox")
+
+        ob = Outbox(path)
+        ob.put("node:tab", ClipPayload(mime="image/png", data=b"real bytes" * 500,
+                                       origin="phone"))
+        for f in os.listdir(sidecar_dir):
+            os.unlink(os.path.join(sidecar_dir, f))
+        check("missing sidecar drops the entry, not a crash",
+              Outbox(path).peek("node:tab") is None)
+
+        ob2 = Outbox(path)
+        ob2.put("node:tab", ClipPayload(mime="image/png", data=b"trustworthy" * 500,
+                                        origin="phone"))
+        for f in os.listdir(sidecar_dir):
+            with open(os.path.join(sidecar_dir, f), "wb") as fh:
+                fh.write(b"tampered!!" * 500)
+        check("sha256 mismatch drops the entry rather than serving corrupt data",
+              Outbox(path).peek("node:tab") is None)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- policy
 
 def test_policy():
@@ -198,9 +272,42 @@ def test_policy():
     check("sensitive clips never transmitted",
           "sensitive" in pol.reject_reason(
               ClipPayload.from_text("hunter2", "x", sensitive=True)))
-    check("non-text rejected while v1 is text-only",
+    check("non-text, non-image content rejected while allow_non_text is false",
           "non-text" in pol.reject_reason(
-              ClipPayload(mime="image/png", data=b"\x89PNG", origin="x")))
+              ClipPayload(mime="application/pdf", data=b"%PDF", origin="x")))
+
+
+def test_policy_images():
+    """Images are governed by their own allow_images flag and max_image_bytes cap --
+    independent of allow_non_text/max_chars, which stay text's own knobs unchanged.
+    """
+    off = Policy(allow_images=False)
+    check("images rejected by default (allow_images=False)",
+          "images disabled" in off.reject_reason(
+              ClipPayload(mime="image/png", data=b"x" * 100, origin="phone")))
+
+    on = Policy(allow_images=True, max_image_bytes=1000)
+    check("image within cap allowed",
+          on.reject_reason(ClipPayload(mime="image/png", data=b"x" * 100, origin="phone"))
+          is None)
+    check("oversize image rejected whole, not truncated",
+          "too large" in on.reject_reason(
+              ClipPayload(mime="image/jpeg", data=b"x" * 2000, origin="phone")))
+    check("image size cap is independent of max_chars",
+          on.reject_reason(ClipPayload(mime="image/gif", data=b"x" * 999, origin="phone"))
+          is None, "max_chars defaults to 800_000, far above this -- confirms the image "
+                    "cap, not max_chars, is what's actually being enforced")
+
+    sensitive_denylist = Policy(allow_images=True, denylist_regex=[r"SECRET"])
+    check("denylist (text-only) never matches against raw image bytes",
+          sensitive_denylist.reject_reason(
+              ClipPayload(mime="image/png", data=b"...SECRET...", origin="phone")) is None,
+          "an image that happens to contain matching bytes must still sync -- the "
+          "denylist only ever inspects payload.text, which is None for an image")
+
+    check("sensitive-flag rejection still applies to images",
+          "sensitive" in on.reject_reason(
+              ClipPayload(mime="image/png", data=b"x" * 10, origin="phone", sensitive=True)))
 
 
 # ---------------------------------------------------------------- domain
@@ -578,7 +685,10 @@ def main() -> int:
     for name, fn in [("payload", test_payload), ("dedup", test_dedup),
                      ("outbox", test_outbox),
                      ("outbox-no-reput", test_outbox_put_skips_unchanged_reput),
+                     ("outbox-image-sidecar", test_outbox_image_sidecar),
+                     ("outbox-sidecar-integrity", test_outbox_sidecar_integrity),
                      ("policy", test_policy),
+                     ("policy-images", test_policy_images),
                      ("domain", test_domain), ("hub-stamp", test_hub_stamp_attribution),
                      ("hub-locked-member", test_hub_routes_around_locked_domain_member),
                      ("hub-repeat-copy", test_repeat_copy_reaches_node_missed_by_first_delivery),

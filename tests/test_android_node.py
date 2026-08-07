@@ -22,8 +22,11 @@ logging.disable(logging.CRITICAL)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from core.models import ClipPayload, WriteResult  # noqa: E402
-from nodes.android_node import AndroidNode        # noqa: E402
+import base64      # noqa: E402
+import hashlib     # noqa: E402
+
+from core.models import ClipPayload, WriteResult          # noqa: E402
+from nodes.android_node import AndroidNode, ACK_WINDOW, CHUNK_BYTES  # noqa: E402
 
 failures: list[str] = []
 
@@ -115,10 +118,167 @@ def test_no_answer_fails_and_marks_transport_dead():
           fake.alive() is False)
 
 
+# ---------------------------------------------------------------- chunked images
+
+def test_chunked_write_large_image():
+    """The image write path (SETB/SETC) is a parallel code path to text's single-line SET
+    above -- this exercises it end to end against a fake transport.
+    """
+    node, fake = _wired_node()
+    data = bytes((i % 256) for i in range(int(CHUNK_BYTES * 3.5)))
+    p = ClipPayload(mime="image/png", data=data, origin="laptop")
+
+    result_box: list[str] = []
+
+    def do_write():
+        result_box.append(node.write(p))
+
+    t = threading.Thread(target=do_write)
+    t.start()
+    time.sleep(0.1)
+
+    setb = [s for s in fake.sent if s.startswith("SETB ")]
+    setc = [s for s in fake.sent if s.startswith("SETC ")]
+    check("exactly one SETB header sent", len(setb) == 1, setb)
+    _, transfer_id, mime, sha, size_s, nchunks_s = setb[0].split(" ")
+    check("SETB mime correct", mime == "image/png")
+    check("SETB sha256 correct", sha == p.sha256)
+    check("SETB size correct", int(size_s) == len(data))
+
+    node._handle("ACK set")
+    t.join(timeout=2)
+    check("write() returns OK once final ACK arrives",
+          result_box and result_box[0] == WriteResult.OK)
+    check("SETC indices sent in order with no gaps",
+          [s.split(" ")[2] for s in setc] == [str(i) for i in range(len(setc))])
+    check("chunk count matches the header's nchunks", len(setc) == int(nchunks_s))
+
+    reassembled = base64.b64decode("".join(s.split(" ", 3)[3] for s in setc))
+    check("reassembled chunk bytes match the original payload", reassembled == data)
+
+
+def test_periodic_chunk_ack_resets_stall_deadline():
+    """A tiny ack_timeout_s must still succeed on a large image PURELY because periodic
+    'ACK setc' resets the deadline each window -- not because the timeout happens to be
+    long enough to cover the whole transfer. This is what keeps write()'s dead-channel
+    detection meaningful at any payload size (see ARCHITECTURE.md §6.7a).
+    """
+    node, fake = _wired_node(ack_timeout_s=0.15)
+    data = bytes(CHUNK_BYTES * 24)  # -> exactly 24 chunks -> periodic waits at idx 8, 16
+    p = ClipPayload(mime="image/png", data=data, origin="laptop")
+
+    result_box: list[str] = []
+    stop = threading.Event()
+
+    def do_write():
+        result_box.append(node.write(p))
+
+    def auto_respond():
+        answered = 0
+        while not stop.is_set():
+            n_setc = sum(1 for s in fake.sent if s.startswith("SETC "))
+            if n_setc > answered:
+                answered = n_setc
+                node._handle(f"ACK setc x {answered - 1}")
+            if any(s.startswith("SETB ") for s in fake.sent) and answered == 24:
+                node._handle("ACK set")
+                return
+            time.sleep(0.005)
+
+    t = threading.Thread(target=do_write)
+    r = threading.Thread(target=auto_respond, daemon=True)
+    t.start()
+    r.start()
+    t.join(timeout=5)
+    stop.set()
+    check("write() survives a tiny timeout purely via periodic ACKs",
+          result_box and result_box[0] == WriteResult.OK, result_box)
+    check("transport not marked dead", fake.alive() is True)
+
+
+def test_chunked_write_times_out_like_text():
+    node, fake = _wired_node(ack_timeout_s=0.05)
+    p = ClipPayload(mime="image/png", data=bytes(CHUNK_BYTES * 2), origin="laptop")
+    result = node.write(p)
+    check("no answer -> FAILED, same guarantee as the text path", result == WriteResult.FAILED)
+    check("transport marked dead so the supervisor notices promptly", fake.alive() is False)
+
+
+def test_inbound_chunked_reassembly():
+    node, fake = _wired_node()
+    received: list[ClipPayload] = []
+    node.subscribe(lambda payload: received.append(payload))
+
+    data = bytes((i * 7) % 256 for i in range(int(CHUNK_BYTES * 2.3)))
+    b64 = base64.b64encode(data).decode("ascii")
+    chunk_chars = ((CHUNK_BYTES + 2) // 3) * 4
+    chunks = [b64[i:i + chunk_chars] for i in range(0, len(b64), chunk_chars)]
+    sha = hashlib.sha256(data).hexdigest()
+
+    node._handle(f"CLIPB xfer1 image/jpeg 0 {sha} {len(data)} {len(chunks)}")
+    for idx, c in enumerate(chunks):
+        node._handle(f"CLIPC xfer1 {idx} {c}")
+
+    check("payload emitted once the last chunk arrives", len(received) == 1)
+    if received:
+        check("mime correct", received[0].mime == "image/jpeg")
+        check("reassembled bytes match the original", received[0].data == data)
+        check("sha256 matches", received[0].sha256 == sha)
+
+
+def test_inbound_sha_mismatch_dropped():
+    node, fake = _wired_node()
+    received: list[ClipPayload] = []
+    node.subscribe(lambda payload: received.append(payload))
+    node._handle("CLIPB xfer2 image/png 0 " + "0" * 64 + " 4 1")
+    node._handle("CLIPC xfer2 0 QUJDRA==")  # decodes fine, but hash won't match the header
+    check("sha256 mismatch drops the payload rather than applying it", len(received) == 0)
+
+
+def test_inbound_gap_aborts_transfer():
+    node, fake = _wired_node()
+    received: list[ClipPayload] = []
+    node.subscribe(lambda payload: received.append(payload))
+    node._handle("CLIPB xfer3 image/png 0 " + "a" * 64 + " 100 3")
+    node._handle("CLIPC xfer3 0 QUJD")
+    node._handle("CLIPC xfer3 2 REVG")  # gap: expected idx=1
+    check("a chunk-index gap aborts the transfer", node._inbound_transfer is None)
+    check("no payload emitted for a gapped transfer", len(received) == 0)
+
+
+def test_inbound_oversize_rejected_before_buffering():
+    node, fake = _wired_node()
+    node.max_image_bytes = 1000
+    node._handle("CLIPB xfer4 image/png 0 " + "b" * 64 + " 999999999 5000")
+    check("an oversize header is rejected before any buffer is allocated",
+          node._inbound_transfer is None)
+
+
+def test_new_inbound_transfer_supersedes_old():
+    node, fake = _wired_node()
+    node._handle("CLIPB old image/png 0 " + "c" * 64 + " 10 5")
+    node._handle("CLIPC old 0 QQ==")
+    check("old transfer has one buffered chunk", len(node._inbound_transfer.chunks) == 1)
+    node._handle("CLIPB new image/png 0 " + "d" * 64 + " 20 3")
+    check("a fresh transfer id replaces the old one, discarding it",
+          node._inbound_transfer.transfer_id == "new"
+          and len(node._inbound_transfer.chunks) == 0)
+
+
 def main() -> int:
     for name, fn in [("ack-confirms-write", test_ack_confirms_write),
                      ("defer-confirms-write", test_defer_confirms_write_on_locked_device),
-                     ("no-answer-fails", test_no_answer_fails_and_marks_transport_dead)]:
+                     ("no-answer-fails", test_no_answer_fails_and_marks_transport_dead),
+                     ("chunked-write-large-image", test_chunked_write_large_image),
+                     ("periodic-chunk-ack-resets-deadline",
+                      test_periodic_chunk_ack_resets_stall_deadline),
+                     ("chunked-write-times-out", test_chunked_write_times_out_like_text),
+                     ("inbound-chunked-reassembly", test_inbound_chunked_reassembly),
+                     ("inbound-sha-mismatch-dropped", test_inbound_sha_mismatch_dropped),
+                     ("inbound-gap-aborts", test_inbound_gap_aborts_transfer),
+                     ("inbound-oversize-rejected",
+                      test_inbound_oversize_rejected_before_buffering),
+                     ("new-transfer-supersedes-old", test_new_inbound_transfer_supersedes_old)]:
         print(f"{name}:")
         fn()
     print()
