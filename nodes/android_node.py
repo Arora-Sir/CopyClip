@@ -171,10 +171,19 @@ class AndroidNode(ClipboardNode):
                 self._mode = "full"
             log.info("[%s] connected", self.name)
             if self._on_connect is not None:
-                try:
-                    self._on_connect(self)
-                except Exception:
-                    log.exception("[%s] on_connect handler failed", self.name)
+                # Deliberately NOT called synchronously here. on_connect (hub.py's
+                # on_node_connected) can call write() as part of catching up a queued
+                # outbox entry, and write() blocks on self._ack_event -- which is only
+                # ever set inside _handle(), which is only ever called from _pump()'s
+                # loop below. Calling on_connect synchronously, before _pump() starts,
+                # was a real deadlock: the ACK line would sit in transport.inbox forever
+                # unread, the write would time out, write() would call
+                # transport.mark_dead(), forcing a reconnect -- which hit the identical
+                # deadlock again on the very next connection, forever. Running it on its
+                # own thread lets _pump() start reading inbox immediately, so any ACK a
+                # catch-up write is waiting on actually gets delivered.
+                threading.Thread(target=self._run_on_connect, name=f"copyclip-{self.name}-connect",
+                                 daemon=True).start()
 
             try:
                 self._pump(transport)
@@ -192,6 +201,12 @@ class AndroidNode(ClipboardNode):
                 if self._stop.wait(backoff):
                     return
                 backoff = min(backoff * 2, self.reconnect_max_s)
+
+    def _run_on_connect(self) -> None:
+        try:
+            self._on_connect(self)
+        except Exception:
+            log.exception("[%s] on_connect handler failed", self.name)
 
     def _pump(self, transport) -> None:
         last_seen = time.time()

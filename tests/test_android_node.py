@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import sys
 import threading
 import time
@@ -55,6 +56,90 @@ class FakeTransport:
 
     def close(self) -> None:
         pass
+
+
+class AutoAckTransport:
+    """A transport double that exercises AndroidNode's REAL threading (start() ->
+    _supervise() -> on_connect -> _pump()), unlike FakeTransport above which is wired
+    directly into an already-"connected" node and never touches _supervise() at all.
+
+    Has a real inbox Queue (as _pump() expects) and a background responder thread that
+    auto-ACKs whatever gets sent, simulating ClipBridge answering over the wire. This is
+    what makes it possible to reproduce -- and prove the fix for -- a bug that is purely
+    about *thread ordering*, not about ACK-matching logic in isolation.
+    """
+
+    def __init__(self) -> None:
+        self.inbox: queue.Queue = queue.Queue()
+        self.sent: list[str] = []
+        self._alive = True
+        self._answered_setc = 0
+
+    def start(self) -> None:
+        self.inbox.put("READY 36")
+        threading.Thread(target=self._respond_loop, daemon=True).start()
+
+    def alive(self) -> bool:
+        return self._alive
+
+    def mark_dead(self) -> None:
+        self._alive = False
+
+    def send_line(self, line: str) -> None:
+        self.sent.append(line)
+
+    def close(self) -> None:
+        self._alive = False
+
+    def _respond_loop(self) -> None:
+        answered_set = False
+        while self._alive:
+            if self.sent and not answered_set:
+                last = self.sent[-1]
+                if last.startswith("SET ") or (
+                    last.startswith("SETC ") and self._is_last_chunk(last)):
+                    answered_set = True
+                    self.inbox.put("ACK set")
+            time.sleep(0.01)
+
+    def _is_last_chunk(self, line: str) -> bool:
+        # "SETC <id> <idx> <chunk>" -- treat any SETC as the last one for this simple
+        # single-write test scenario (only one write is ever exercised per test).
+        return True
+
+
+def test_write_triggered_from_on_connect_does_not_deadlock():
+    """Regression for the real bug found in production use: on_connect (which is
+    hub.on_node_connected in the real daemon, catching up a queued outbox entry via
+    write()) used to be called synchronously BEFORE _pump() started, so write()'s
+    self._ack_event.wait() could never be satisfied -- the ACK sat unread in
+    transport.inbox until _pump() eventually started, by which point write() had already
+    timed out, called transport.mark_dead(), and forced a reconnect that hit the
+    identical deadlock again. Infinite loop, 100% reproducible, once anything is queued
+    at connect time. Fixed by running on_connect on its own thread so _pump() can start
+    draining inbox immediately. This test fails hard (times out) against the pre-fix code.
+    """
+    result_box: list[str] = []
+    connect_event = threading.Event()
+
+    def on_connect(node: AndroidNode) -> None:
+        # Mirrors hub.on_node_connected() calling write() to catch up a queued entry.
+        p = ClipPayload.from_text("catch-up write triggered at connect time", origin="laptop")
+        result_box.append(node.write(p))
+        connect_event.set()
+
+    node = AndroidNode("phone", transport_factory=AutoAckTransport,
+                       ack_timeout_s=2.0, on_connect=on_connect)
+    node.start()
+    try:
+        completed = connect_event.wait(timeout=5.0)
+        check("on_connect's write() completes at all (no deadlock)", completed)
+        check("on_connect's write() actually succeeded, not timed out",
+              result_box and result_box[0] == WriteResult.OK, result_box)
+        check("node is still connected (write() did not spuriously mark the transport dead)",
+              node.available)
+    finally:
+        node.stop()
 
 
 def _wired_node(ack_timeout_s: float = 4.0) -> tuple[AndroidNode, FakeTransport]:
@@ -269,6 +354,8 @@ def main() -> int:
     for name, fn in [("ack-confirms-write", test_ack_confirms_write),
                      ("defer-confirms-write", test_defer_confirms_write_on_locked_device),
                      ("no-answer-fails", test_no_answer_fails_and_marks_transport_dead),
+                     ("on-connect-write-no-deadlock",
+                      test_write_triggered_from_on_connect_does_not_deadlock),
                      ("chunked-write-large-image", test_chunked_write_large_image),
                      ("periodic-chunk-ack-resets-deadline",
                       test_periodic_chunk_ack_resets_stall_deadline),

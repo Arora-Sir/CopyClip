@@ -59,3 +59,11 @@ without reading the relevant section is how a proven mechanism quietly breaks.
 - `bugs/` — dated incident writeups and device spikes, all with measured evidence.
 - `tests/` — `test_core.py`/`test_android_node.py`/`test_imaging.py` are pure logic, no
   devices, run in under a second; `test_e2e.py`/`test_three_device.py` need real hardware.
+
+## Project Skills
+# Loaded on top of the 14 global Tier 0 skills in <skills>\
+
+@<skills>\python-django
+@<skills>\windows-desktop-e2e
+@<skills>\performance-optimization
+@<skills>\android-mastery
