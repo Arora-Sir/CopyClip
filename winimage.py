@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ctypes
 import struct
+import threading
 import zlib
 from ctypes import wintypes
 
@@ -85,18 +86,23 @@ kernel32.GlobalLock.restype = wintypes.LPVOID
 kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
 kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
 
-_CO_INITIALIZED = False
+# CoInitializeEx is per-thread (COM apartment state lives on the calling thread), so the
+# "already initialized" flag must be thread-local too -- a module-global bool here would let
+# one thread's CoInitializeEx call satisfy the check for every other thread, leaving those
+# threads' COM apartments genuinely uninitialized and CoCreateInstance failing with
+# CO_E_NOTINITIALIZED. decode() is called from multiple long-lived threads (the clipboard
+# watcher thread and each device's pump thread), so this isn't a hypothetical.
+_com_state = threading.local()
 
 
 def _ensure_com() -> None:
-    global _CO_INITIALIZED
-    if _CO_INITIALIZED:
+    if getattr(_com_state, "initialized", False):
         return
     hr = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
     # S_OK=0 or S_FALSE=1 (already initialized on this thread) are both fine.
     if hr not in (0, 1):
         raise ImageDecodeError(f"CoInitializeEx failed: 0x{hr & 0xFFFFFFFF:08X}")
-    _CO_INITIALIZED = True
+    _com_state.initialized = True
 
 
 def _hr_check(hr: int, what: str) -> None:

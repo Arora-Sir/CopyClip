@@ -25,6 +25,8 @@ import android.provider.OpenableColumns;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -39,8 +41,10 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -579,6 +583,7 @@ public final class ClipBridge {
 
     private static void serve() throws Exception {
         emit("READY " + android.os.Build.VERSION.SDK_INT);
+        initScreenshotWatch();
 
         Thread stdin = new Thread(ClipBridge::readCommands, "copyclip-stdin");
         stdin.setDaemon(true);
@@ -589,6 +594,14 @@ public final class ClipBridge {
 
         while (true) {
             try {
+                // Unconditional: a locked device still takes screenshots (they're saved by
+                // the system screenshot service, not by anything gated on the keyguard),
+                // and unlike clipboard content there's nothing here that a locked-device
+                // read would silently discard -- this is a plain file read, not
+                // getPrimaryClip(). Runs every tick regardless of stampOnly too -- see
+                // checkScreenshots()'s own comment for why.
+                checkScreenshots();
+
                 boolean locked = isLocked();
                 if (locked != lastLocked) {
                     lastLocked = locked;
@@ -937,7 +950,16 @@ public final class ClipBridge {
             raw = readAllBounded(is, MAX_IMAGE_BYTES);
         }
 
-        String mimeLower = sourceMime == null ? "" : sourceMime.toLowerCase(Locale.ROOT);
+        return applyPassthroughOrTranscode(raw, sourceMime);
+    }
+
+    /**
+     * The pass-through/transcode decision, factored out so both the clipboard-URI path
+     * above and the screenshot-file path below (§ checkScreenshots) share one
+     * implementation rather than two copies that could drift.
+     */
+    private static Object[] applyPassthroughOrTranscode(byte[] raw, String mimeGuess) throws Exception {
+        String mimeLower = mimeGuess == null ? "" : mimeGuess.toLowerCase(Locale.ROOT);
         if (PASSTHROUGH_MIMES.contains(mimeLower)) {
             return new Object[]{raw, mimeLower};
         }
@@ -967,6 +989,191 @@ public final class ClipBridge {
             bos.write(buf, 0, n);
         }
         return bos.toByteArray();
+    }
+
+    // ------------------------------------------------------------ screenshot-folder watch
+
+    /**
+     * Samsung's screenshot capture does not call setPrimaryClip() -- measured directly:
+     * bugs/SCREENSHOT-SYNC-FIX.md, three real screenshots taken while this poll loop was
+     * running produced zero clipboard events. The "clipboard panel" showing a recent
+     * screenshot is a convenience suggestion list, not the actual system clipboard. So
+     * there is no clip event to catch here; instead this watches the screenshot folder
+     * directly for new files, using the exact same poll-every-tick approach already used
+     * for clipboard timestamps -- no FileObserver, no hidden API, consistent with the rest
+     * of this file's philosophy.
+     *
+     * Confirmed via `adb shell` on this hardware: /sdcard/DCIM/Screenshots (NOT
+     * Pictures/Screenshots, which does not exist on this device), identical path on both
+     * phone and tablet, and the shell UID has full read access to both the listing and
+     * file contents via its sdcard_rw/sdcard_r group membership -- no ContentResolver, no
+     * FakeContext needed, plain java.io.File/FileInputStream.
+     */
+    private static final File SCREENSHOT_DIR = new File("/sdcard/DCIM/Screenshots");
+
+    private static String lastScreenshotName;
+
+    // Recently-pushed screenshot hashes, so a rare case where Samsung's own screenshot flow
+    // produces two on-disk files for one real capture (different filenames -- e.g. a
+    // scrolling-screenshot preview-then-final pair) doesn't get pushed twice. Defense in
+    // depth on top of checkScreenshots()'s filename-identity check above: that check
+    // handles the *measured*, common case (same file rewritten in place by a background
+    // process -- see bugs/BUG-005-duplicate-screenshot-push.md); this handles a
+    // same-content-different-filename case that check structurally can't catch. Not a
+    // substitute for suppressHash below -- that's a single slot for the device's own most
+    // recent *clipboard* write and is trivially clobbered by any other doSet in between.
+    private static final long SCREENSHOT_DEDUP_WINDOW_MS = 20_000;
+    private static final Map<String, Long> recentScreenshotHashes = new LinkedHashMap<String, Long>() {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
+            return size() > 32;
+        }
+    };
+
+    private static synchronized boolean recentlyPushedScreenshot(String hash) {
+        long now = System.currentTimeMillis();
+        Long last = recentScreenshotHashes.put(hash, now);
+        return last != null && (now - last) < SCREENSHOT_DEDUP_WINDOW_MS;
+    }
+
+    /**
+     * Establishes the starting baseline silently -- called once before the poll loop
+     * starts, so the newest screenshot already on disk when ClipBridge launches is never
+     * announced as if it just appeared. This is deliberately a *local* baseline, not the
+     * hub's existing on_node_connected() baseline mechanism: that mechanism is single-shot
+     * per node (discards itself after the first clip it sees), so a device that can emit
+     * two independent "first" signals -- current clipboard content, and current newest
+     * screenshot -- would have the second one wrongly treated as a genuine new clip to
+     * sync. Keeping this baseline entirely on the device side avoids that collision.
+     */
+    private static void initScreenshotWatch() {
+        File newest = findNewestScreenshot();
+        if (newest != null) {
+            lastScreenshotName = newest.getName();
+        }
+    }
+
+    private static File findNewestScreenshot() {
+        File[] files = SCREENSHOT_DIR.listFiles();
+        if (files == null || files.length == 0) {
+            return null;
+        }
+        File newest = null;
+        for (File f : files) {
+            if (!f.isFile()) {
+                continue;
+            }
+            if (newest == null || f.lastModified() > newest.lastModified()) {
+                newest = f;
+            }
+        }
+        return newest;
+    }
+
+    /**
+     * Called on every poll tick, unconditionally -- deliberately NOT gated behind
+     * stampOnly the way clipboard content reads are. Samsung Continuity relays clipboard
+     * *content* between phone and tablet, so only one domain member needs to read it; it
+     * does not relay arbitrary new *files*, so each device must watch its own screenshot
+     * folder independently regardless of which one is the domain's current clipboard
+     * representative.
+     */
+    private static void checkScreenshots() {
+        try {
+            File newest = findNewestScreenshot();
+            if (newest == null) {
+                return;
+            }
+            // Filename identity only -- lastModified() used to be part of this check too,
+            // but a background process (media scanner, gallery thumbnail regen, cloud
+            // backup) can rewrite the current newest file's bytes in place without any real
+            // new screenshot happening: measured directly, same file size, different
+            // sha256, new mtime, every time (bugs/BUG-005-duplicate-screenshot-push.md).
+            // That used to look like a fresh screenshot and re-pushed the same shot
+            // repeatedly. The filename is what actually identifies "which screenshot" --
+            // Android's own timestamp-based naming already guarantees a genuinely new
+            // capture gets a new name.
+            if (lastScreenshotName != null && newest.getName().equals(lastScreenshotName)) {
+                return;
+            }
+            lastScreenshotName = newest.getName();
+            emitScreenshot(newest);
+        } catch (Throwable t) {
+            emit("ERR screenshot: " + describe(t));
+        }
+    }
+
+    /**
+     * Reads a newly-detected screenshot file directly and routes it through the same
+     * chunked CLIPB/CLIPC machinery a clipboard-sourced image uses (sendChunkedClip) --
+     * this is a new *trigger*, not a new pipeline. No DESC-then-GET two-step: unlike
+     * clipboard content, a screenshot file is never redundantly re-announced by a Samsung
+     * Continuity relay, so there is no "wait for a GET" step to save work on.
+     */
+    private static void emitScreenshot(File file) {
+        // Deliberately NOT gated on imagingAvailable: unlike clipboard-URI images, this
+        // path never touches FakeContext/ContentResolver at all -- it's a plain file read
+        // via java.io.File/FileInputStream. If FakeContext ever fails to initialize (some
+        // OEM quirk), screenshot watching should keep working regardless; they are
+        // independent capabilities that merely share the outbound chunked-CLIP wire format.
+        long size = file.length();
+        if (size <= 0 || size > MAX_IMAGE_BYTES) {
+            emit("SKIP image/unknown screenshot-oversize-or-empty");
+            return;
+        }
+        byte[] raw;
+        try (InputStream is = new FileInputStream(file)) {
+            raw = readAllBounded(is, MAX_IMAGE_BYTES);
+        } catch (Exception e) {
+            emit("SKIP image/unknown screenshot-read-failed:" + describe(e));
+            return;
+        }
+        byte[] data;
+        String outMime;
+        try {
+            Object[] r = applyPassthroughOrTranscode(raw, sniffImageMime(raw));
+            data = (byte[]) r[0];
+            outMime = (String) r[1];
+        } catch (Exception e) {
+            emit("SKIP image/unknown screenshot-transcode-failed:" + describe(e));
+            return;
+        }
+        String hash = sha256Bytes(data);
+        if (hash.equals(suppressHash)) {
+            return; // matches something we just wrote to this device ourselves
+        }
+        if (recentlyPushedScreenshot(hash)) {
+            return; // same visual content pushed moments ago under a different filename
+        }
+        sendChunkedClip(outMime, false, hash, data);
+    }
+
+    /**
+     * Detects format from magic bytes rather than assuming JPEG (the observed format for
+     * Samsung's own screenshots) -- a screenshot tool or Android version could plausibly
+     * save PNG instead, and guessing wrong would silently corrupt the mime tag the laptop
+     * relies on to pick a decode path.
+     */
+    private static String sniffImageMime(byte[] data) {
+        if (data.length >= 3 && (data[0] & 0xFF) == 0xFF && (data[1] & 0xFF) == 0xD8
+                && (data[2] & 0xFF) == 0xFF) {
+            return "image/jpeg";
+        }
+        if (data.length >= 8 && data[0] == (byte) 0x89 && data[1] == 'P' && data[2] == 'N'
+                && data[3] == 'G') {
+            return "image/png";
+        }
+        if (data.length >= 6 && data[0] == 'G' && data[1] == 'I' && data[2] == 'F') {
+            return "image/gif";
+        }
+        if (data.length >= 2 && data[0] == 'B' && data[1] == 'M') {
+            return "image/bmp";
+        }
+        if (data.length >= 12 && data[8] == 'W' && data[9] == 'E' && data[10] == 'B'
+                && data[11] == 'P') {
+            return "image/webp";
+        }
+        return "image/unknown";
     }
 
     /**

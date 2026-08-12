@@ -31,6 +31,7 @@ from core.outbox import Outbox                  # noqa: E402
 from core.policy import Policy                  # noqa: E402
 from domains.sync_domain import SyncDomain      # noqa: E402
 from nodes.base import ClipboardNode            # noqa: E402
+from nodes.windows_node import WindowsNode      # noqa: E402
 
 failures: list[str] = []
 
@@ -681,6 +682,140 @@ def test_winclip_concurrency():
             pass
 
 
+def test_write_image_excludes_from_clipboard_history():
+    """A device-synced image must not appear in (or evict entries from) Windows Clipboard
+    History -- see bugs/BUG-005's Open points for the full investigation. This checks that
+    CF_CAN_INCLUDE_IN_HISTORY=0 is actually set alongside the image data; whether that
+    genuinely stops History from evicting other entries is real-use verification, not
+    something a unit test can observe (there's no API to inspect History's own state).
+
+    Saves and restores whatever is on the clipboard so running the suite is not destructive.
+    """
+    import winclip
+    import winimage
+
+    try:
+        original = winclip.read_text()
+    except Exception:
+        original = None
+
+    w, h = 4, 4
+    bgra = bytes([100, 150, 200, 255]) * (w * h)
+    png = winimage.png_from_bgra(bgra, w, h, has_alpha=True)
+
+    winclip.write_image(png, "image/png")
+
+    with winclip._Opened():
+        available = bool(winclip.user32.IsClipboardFormatAvailable(
+            winclip.CF_CAN_INCLUDE_IN_HISTORY))
+        value = winclip._read_global(winclip.CF_CAN_INCLUDE_IN_HISTORY) if available else None
+
+    check("CanIncludeInClipboardHistory format is set on a device-synced image", available)
+    check("CanIncludeInClipboardHistory value is 0 (excluded)",
+          value == (0).to_bytes(4, "little"), repr(value))
+
+    # exclude_from_history=False (config's screenshot_exclude_from_history toggle) must
+    # skip setting the format entirely, not set it with a different value.
+    winclip.write_image(png, "image/png", exclude_from_history=False)
+    with winclip._Opened():
+        available_off = bool(winclip.user32.IsClipboardFormatAvailable(
+            winclip.CF_CAN_INCLUDE_IN_HISTORY))
+    check("exclude_from_history=False does not set the format at all", not available_off)
+
+    if original is not None:
+        try:
+            winclip.write_text(original)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------- screenshot backup
+
+def test_screenshot_backup():
+    """Stopgap local-file backup for the Windows 11 25H2 Snipping Tool double-write bug
+    (see ARCHITECTURE.md's "Two entries in Windows Clipboard History" note).
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        node = WindowsNode("laptop", screenshot_dir=tmp)
+        png = b"\x89PNG\r\n\x1a\n" + b"not a real png body, just bytes to persist" * 4
+        payload = ClipPayload(mime="image/png", data=png, origin="laptop")
+
+        node._maybe_save_screenshot(payload)
+        files = os.listdir(tmp)
+        check("screenshot file created", len(files) == 1, str(files))
+        check("filename matches Windows' own style",
+              bool(files) and files[0].startswith("Screenshot ") and files[0].endswith(".png"),
+              str(files))
+        if files:
+            with open(os.path.join(tmp, files[0]), "rb") as fh:
+                check("saved bytes match the payload exactly, no re-encoding", fh.read() == png)
+
+        # Same content saved again moments later must be deduped, not written as a second
+        # file -- this is the fix for the duplicate-save bug found in live testing: Windows
+        # firing the clipboard-changed notification twice for one snip, and the own-write
+        # echo race in write(), both reach _maybe_save_screenshot() with identical bytes.
+        node._maybe_save_screenshot(payload)
+        check("re-saving identical content moments later is deduped, not written again",
+              os.listdir(tmp) == files, str(os.listdir(tmp)))
+
+        # A genuinely different image landing in the same second must still get its own
+        # file -- dedup is content-based (by sha256), not "only ever save once per second".
+        different = ClipPayload(mime="image/png", data=png + b"more", origin="laptop")
+        node._maybe_save_screenshot(different)
+        files2 = sorted(os.listdir(tmp))
+        check("a different image in the same second still gets its own, distinctly-named file",
+              len(files2) == 2 and any(" (2)" in f for f in files2), str(files2))
+
+        # Dedup is TTL-bounded, not permanent: a deliberately re-taken identical screenshot
+        # later must still be saved. Same pattern as test_dedup's "entries expire" case.
+        short_ttl_node = WindowsNode("laptop", screenshot_dir=tmp)
+        short_ttl_node._screenshot_dedup = RecentClips(ttl=0.3)
+        third = ClipPayload(mime="image/png", data=png + b"unique-for-ttl-test", origin="laptop")
+        short_ttl_node._maybe_save_screenshot(third)
+        before_ttl = set(os.listdir(tmp))
+        time.sleep(0.45)
+        short_ttl_node._maybe_save_screenshot(third)
+        check("identical content saves again once the dedup window has expired",
+              len(os.listdir(tmp)) == len(before_ttl) + 1, str(os.listdir(tmp)))
+
+        # Off by default: a falsy screenshot_dir must be a complete no-op.
+        before = set(os.listdir(tmp))
+        WindowsNode("laptop", screenshot_dir=None)._maybe_save_screenshot(payload)
+        check("no screenshot_dir configured -> nothing written anywhere",
+              set(os.listdir(tmp)) == before)
+
+        # Never raises, even when the directory genuinely cannot be created (a file, not a
+        # folder, sits where a parent directory component needs to be).
+        blocker = os.path.join(tmp, "blocked_by_a_file")
+        with open(blocker, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        bad_node = WindowsNode("laptop", screenshot_dir=os.path.join(blocker, "sub"))
+        try:
+            bad_node._maybe_save_screenshot(payload)
+            check("unwritable target directory does not raise", True)
+        except Exception as exc:
+            check("unwritable target directory does not raise", False, repr(exc))
+
+        # write()'s screenshot_include_devices gate -- stubbed to avoid touching the real
+        # clipboard (the actual winclip.write_image() call is exercised separately by
+        # test_winclip_concurrency and BUG-002's own coverage; garbage PNG bytes here would
+        # only fail decode inside write(), which is irrelevant to what this checks).
+        calls: list[str] = []
+        included = WindowsNode("laptop", screenshot_dir=tmp, screenshot_include_devices=True)
+        included._maybe_save_screenshot = lambda p: calls.append("included")
+        included.write(payload)
+        check("write() saves when screenshot_include_devices=True", calls == ["included"])
+
+        excluded = WindowsNode("laptop", screenshot_dir=tmp, screenshot_include_devices=False)
+        excluded._maybe_save_screenshot = lambda p: calls.append("excluded")
+        excluded.write(payload)
+        check("write() skips the save when screenshot_include_devices=False",
+              calls == ["included"], str(calls))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     for name, fn in [("payload", test_payload), ("dedup", test_dedup),
                      ("outbox", test_outbox),
@@ -696,7 +831,9 @@ def main() -> int:
                      ("hub-already-satisfied", test_domain_delivery_already_satisfied_is_not_requeued),
                      ("hub-drain-lock", test_drain_outbox_serializes_with_route_lock),
                      ("single-instance", test_single_instance),
-                     ("winclip", test_winclip_concurrency)]:
+                     ("winclip", test_winclip_concurrency),
+                     ("winclip-history-exclude", test_write_image_excludes_from_clipboard_history),
+                     ("screenshot-backup", test_screenshot_backup)]:
         print(f"{name}:")
         fn()
     print()

@@ -146,6 +146,15 @@ _REGISTERED_MIME = {
 }
 _MIME_REGISTERED = {v: k for k, v in _REGISTERED_MIME.items()}
 
+# Set alongside an image in write_image() (DWORD 0) to tell Windows' Clipboard History
+# service to skip that item entirely -- a large device-synced screenshot was observed
+# evicting the user's existing History entries (see ARCHITECTURE.md's "Two entries in
+# Windows Clipboard History" note and bugs/BUG-005's Open points for the full
+# investigation); this trades away that one image's own History visibility (Ctrl+V still
+# pastes it correctly -- this only affects History's bookkeeping, never the live clipboard)
+# in exchange for not disturbing the rest of the user's history.
+CF_CAN_INCLUDE_IN_HISTORY = user32.RegisterClipboardFormatW("CanIncludeInClipboardHistory")
+
 
 class _Opened:
     """RAII clipboard lock.
@@ -326,13 +335,19 @@ def write_text(text: str, attempts: int = 4) -> None:
     _write_retrying([(CF_UNICODETEXT, data)], attempts)
 
 
-def write_image(data: bytes, mime: str, attempts: int = 4) -> None:
+def write_image(data: bytes, mime: str, attempts: int = 4, *,
+                 exclude_from_history: bool = True) -> None:
     """Replace the clipboard with an image, encoded as `data`/`mime`.
 
     Sets, in one open/empty/close cycle: CF_DIBV5 (decoded via winimage, alpha
     preserved) so *any* app that only understands the DIB formats can paste it, plus
     the original bytes under the matching registered format (PNG/JFIF/GIF) when one
-    exists, for a byte-identical, no-re-encode round trip in apps that prefer it.
+    exists, for a byte-identical, no-re-encode round trip in apps that prefer it, plus
+    -- when `exclude_from_history` is true (the default) -- CF_CAN_INCLUDE_IN_HISTORY=0
+    so this image doesn't show up in (or evict entries from) Windows Clipboard History.
+    Ctrl+V always pastes it normally either way; the flag only affects History's own
+    bookkeeping. See config.json's `screenshot_exclude_from_history` and
+    bugs/BUG-005-duplicate-screenshot-push.md's Open points for why this exists.
 
     Raises winimage.ImageDecodeError if `data` cannot be decoded (corrupt bytes, or a
     format WIC has no codec for) -- callers must treat that as a failed write, not crash.
@@ -344,6 +359,8 @@ def write_image(data: bytes, mime: str, attempts: int = 4) -> None:
     registered_fmt = _MIME_REGISTERED.get(mime)
     if registered_fmt:
         items.append((registered_fmt, data))
+    if exclude_from_history:
+        items.append((CF_CAN_INCLUDE_IN_HISTORY, (0).to_bytes(4, "little")))
 
     _write_retrying(items, attempts)
 

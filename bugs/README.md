@@ -11,6 +11,8 @@ in real use, not merely when a test passes.
 | [BUG-001](BUG-001-clipboard-toast-storm.md) | Toast storm on every copy; Link to Windows reads the clipboard despite being "off" | Medium (noise, privacy) | **OPEN, fix applied, awaiting confirmation** |
 | [BUG-002](BUG-002-windows-emptyclipboard-1418.md) | `EmptyClipboard failed (err=1418)` drops the clip entirely | **High (data loss)** | **OPEN, fix applied, awaiting confirmation** |
 | [BUG-003](BUG-003-duplicate-daemon-instances.md) | Two daemons run at once: every laptop copy lands on the phone twice, and log lines go missing | High | **OPEN, fix applied, awaiting confirmation** |
+| [BUG-004](BUG-004-com-thread-init.md) | `CoCreateInstance` fails with `CO_E_NOTINITIALIZED` on some threads, silently dropping an incoming image | High (data loss) | **OPEN, fix applied, awaiting confirmation** |
+| [BUG-005](BUG-005-duplicate-screenshot-push.md) | A screenshot re-touched in place by a background process (media scanner, thumbnail regen, ...) gets re-pushed as if it were new | Medium-High | **OPEN, fix applied, awaiting confirmation** |
 
 ## Companion files
 

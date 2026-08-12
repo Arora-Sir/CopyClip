@@ -58,6 +58,10 @@ DEFAULT_CONFIG = {
     "max_image_bytes": 25_165_824,
     "image_chunk_bytes": 49_152,
 
+    "screenshot_backup_dir": "",
+    "screenshot_backup_include_devices": True,
+    "screenshot_exclude_from_history": True,
+
     "adopt_on_connect": False,
     "dedup_ttl_s": 90.0,
     "reconnect_min_s": 1.0,
@@ -157,7 +161,12 @@ def make_transport_factory(cfg: dict, dev: dict):
 
 
 def build_hub(cfg: dict) -> Hub:
-    laptop = WindowsNode("laptop")
+    laptop = WindowsNode(
+        "laptop",
+        screenshot_dir=cfg.get("screenshot_backup_dir") or None,
+        screenshot_include_devices=cfg["screenshot_backup_include_devices"],
+        exclude_synced_images_from_history=cfg["screenshot_exclude_from_history"],
+    )
     android: dict[str, AndroidNode] = {}
     hub_ref: dict[str, Hub] = {}
 

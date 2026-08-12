@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import struct
 import sys
+import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -145,6 +146,40 @@ def test_real_jpeg_decode():
           (w2, h2) == (w, h) and bgra2 == bgra)
 
 
+def test_decode_from_multiple_threads():
+    """CoInitializeEx is per-thread: a module-global "already initialized" flag lets one
+    thread's call satisfy the check for every other thread, leaving those threads' COM
+    apartments genuinely uninitialized and CoCreateInstance failing with
+    CO_E_NOTINITIALIZED. decode() runs on multiple long-lived threads in production (the
+    clipboard watcher thread, each device's pump thread), so this must be exercised from
+    fresh threads that have never called decode() before, not just the main thread.
+    """
+    w, h = 24, 18
+    bgra = _gradient_bgra(w, h)
+    png = winimage.png_from_bgra(bgra, w, h, has_alpha=True)
+
+    errors: list[BaseException] = []
+    results: list[bool] = []
+
+    def worker() -> None:
+        try:
+            decoded, dw, dh = winimage.decode(png)
+            results.append((dw, dh) == (w, h) and decoded == bgra)
+        except BaseException as exc:  # noqa: BLE001 - must not let a thread's raise vanish
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    check("decode from 8 fresh threads raises nothing",
+          not errors, f"{len(errors)} error(s): {errors[:2]}")
+    check("every thread decoded the identical, correct pixels",
+          len(results) == 8 and all(results), f"{sum(results)}/8 correct")
+
+
 def test_performance_1080p():
     """Not a hard pass/fail gate -- just a visible sanity signal that a realistic
     screenshot-sized image doesn't take an unreasonable amount of time.
@@ -170,6 +205,7 @@ def main() -> int:
         ("dib-24bpp-bottom-up", test_dib_24bpp_bottom_up_with_padding),
         ("malformed-input", test_malformed_input_raises_not_crashes),
         ("real-jpeg-decode", test_real_jpeg_decode),
+        ("decode-from-multiple-threads", test_decode_from_multiple_threads),
         ("performance-1080p", test_performance_1080p),
     ]:
         print(f"{name}:")

@@ -62,6 +62,16 @@ matters because Tailscale runs here permanently. So after each write CopyClip wa
 whether the other device echoes the same content hash within 8 seconds. Three misses in a
 row and it starts writing to both devices directly until propagation recovers.
 
+### 3. What actually keeps a third party from reading or injecting your clips
+
+Tailscale (WireGuard) and adb's own key-authorization are what protect this in transit —
+not anything CopyClip's own wire protocol adds. The laptop never listens on a socket, so
+nothing can connect *to* it; both devices are addressed by fixed Tailscale IP; and anyone
+who isn't already a member of your tailnet or an authorized adb key holder for your phone/
+tablet is not on the path at all. Full detail, including what CopyClip's protocol does
+*not* add on top of that:
+[ARCHITECTURE.md §9](ARCHITECTURE.md#9-security--trust-model).
+
 ---
 
 ## Setup
@@ -176,6 +186,9 @@ script in this folder.
 | `ack_timeout_s` | How long a write waits for the device's real `ACK`/`DEFER` reply before being treated as failed. A successful local pipe write is not proof the device received it; this is what actually confirms delivery. See [ARCHITECTURE.md §6.3](ARCHITECTURE.md#63-ack-confirmed-writes) |
 | `allow_images` | Whether image clips sync at all. Defaults `false` pending real-use confirmation — see [ARCHITECTURE.md §6.6a](ARCHITECTURE.md#66a-image-clipboard-mediastore-under-app_process-and-why-it-needed-fakecontext) |
 | `max_image_bytes` | Oversized images are **skipped and logged**, never truncated — enforced on both the laptop and each device independently |
+| `screenshot_backup_dir` | Local folder every image clip (laptop-native or synced from a device) also gets saved into as a plain file, Windows'-own-naming-style (`Screenshot yyyy-MM-dd HHMMSS.png`). Empty string (default) disables it. A stopgap for a Windows 11 25H2 Snipping Tool bug — see [ARCHITECTURE.md §8](ARCHITECTURE.md#8-lessons-learned-this-session) |
+| `screenshot_backup_include_devices` | Whether `screenshot_backup_dir` also covers images arriving *from* the phone/tablet, not just ones captured on the laptop itself. Default `true` |
+| `screenshot_exclude_from_history` | Whether a device-synced image is excluded from Windows Clipboard History (Win+V) so it can't evict your other history entries. Default `true`. Ctrl+V still pastes it correctly either way — this only affects whether it's *listed* in Win+V. `false` brings back Win+V visibility for synced screenshots, at the cost of the eviction problem this exists to solve — see [bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md) |
 
 Devices are addressed by **raw Tailscale IP, never MagicDNS**, which sidesteps NRPT
 resolution breaking.
@@ -236,6 +249,20 @@ Samsung's phone-to-tablet sync is not working: check both devices are on the sam
 signed into the same Samsung account, with Bluetooth on. CopyClip has already failed over to
 writing both devices directly, so sync keeps working meanwhile.
 
+### A synced phone/tablet screenshot doesn't show up in Win+V, but pastes fine
+
+Expected, by design, not a bug: `screenshot_exclude_from_history` (default `true`)
+deliberately excludes device-synced images from Windows Clipboard History. Ctrl+V still
+pastes the correct image — this only affects whether it's *listed* in Win+V. It exists
+because a large synced image was found to evict the user's *other* Win+V entries, and
+there's no known way to keep both (visible in Win+V and not evicting anything) — see
+[bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md). Set the config key to `false` to
+bring back Win+V visibility for synced screenshots and accept the eviction risk instead.
+
+If you want the file itself, not just the clipboard/history: `screenshot_backup_dir` (see
+[Configuration](#configuration) and [Images](#images) above) saves every synced screenshot
+as a plain file regardless of this setting.
+
 ### General health check
 
 ```bash
@@ -259,10 +286,22 @@ PNG/JPEG/GIF/BMP/WEBP travel byte-for-byte; only HEIC/HEIF/AVIF transcode to PNG
 stored on-device under `Pictures/CopyClip` via MediaStore, and capped at `max_image_bytes`
 (default 24 MiB), skipped and logged rather than truncated if oversized.
 
+The laptop side has a counterpart: `screenshot_backup_dir` saves every image clip (local or
+synced from a device) as a plain file too, same idea as the Android `Pictures/CopyClip`
+store but Windows'-own-filename-style — a stopgap for a Windows 11 25H2 Snipping Tool bug,
+off by default (empty string).
+
+A device-synced image is also, by default, excluded from Windows Clipboard History
+(Win+V) — `screenshot_exclude_from_history`. Ctrl+V still pastes it normally; it just
+won't show up as its own entry in Win+V's list. This exists because a large synced image
+was observed evicting the user's *other* Win+V entries, and there is no way to keep both
+(visible in Win+V *and* not evicting anything) — see
+[bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md) for the full investigation.
+
 ## Future scope
 
 Designed for, deliberately not built. Full detail:
-[ARCHITECTURE.md §11](ARCHITECTURE.md#11-future-scope-designed-for-not-built).
+[ARCHITECTURE.md §12](ARCHITECTURE.md#12-future-scope-designed-for-not-built).
 
 - **Files** via Taildrop handoff.
 - **Clipboard history** with search.

@@ -132,7 +132,7 @@ being falsely marked "delivered" and later either lost or delivered stale.
 | [core/policy.py](core/policy.py) | Size cap, denylist regex, and sensitive-clip filtering (skips anything a source app flagged with Android's `EXTRA_IS_SENSITIVE`, e.g. a password manager). |
 | [core/models.py](core/models.py) | `ClipPayload`/`ClipDescriptor` — the shared data shapes; `WriteResult` — the outcome enum every node's `write()` returns. |
 | [nodes/base.py](nodes/base.py) | `ClipboardNode`, the abstract contract the hub actually depends on. |
-| [nodes/windows_node.py](nodes/windows_node.py) | The laptop as a node. Thin wrapper over [winclip.py](winclip.py) (raw ctypes, no pywin32) and [winimage.py](winimage.py) (image codec, §6.6a). |
+| [nodes/windows_node.py](nodes/windows_node.py) | The laptop as a node. Thin wrapper over [winclip.py](winclip.py) (raw ctypes, no pywin32) and [winimage.py](winimage.py) (image codec, §6.6a). Also owns the optional local screenshot-backup save (§8, `screenshot_backup_dir`). |
 | [winimage.py](winimage.py) | PNG encode (hand-rolled, deterministic), WIC-backed decode (arbitrary formats), DIB↔PNG conversion. No third-party deps. |
 | [nodes/android_node.py](nodes/android_node.py) | A phone or tablet as a node. Owns its own connect/reconnect supervisor and speaks the ClipBridge wire protocol (§5). |
 | [domains/sync_domain.py](domains/sync_domain.py) | `SyncDomain` — the phone+tablet grouping. Elects a representative, tracks whether Samsung Continuity is actually propagating (healthy vs degraded), and decides who gets written to for one clip. |
@@ -372,6 +372,9 @@ reason — changing one is a real tradeoff, not a free lunch.
 | `allow_images` | `false` | Whether image clips sync at all (§6.6a) | Defaults off pending real-use confirmation of bugs/SPIKE-IMAGE-CLIPBOARD.md's open Q5/Q7; flip once confirmed |
 | `max_image_bytes` | 25,165,824 (24 MiB) | Oversize images are **skipped and logged**, never truncated — enforced independently on the laptop (`core/policy.py`) and on each device (`ClipBridge.java`'s own `MAX_IMAGE_BYTES`) | Higher = larger screenshots sync, more memory pressure per transfer on both ends |
 | `image_chunk_bytes` | 49,152 (48 KiB) | Raw bytes per chunk in the `SETB`/`SETC` framing (§6.7a) | Smaller = more `ACK setc` round trips, faster stall detection on a shaky link; larger = fewer round trips, coarser stall detection |
+| `screenshot_backup_dir` | `""` (off) | Local folder every image clip also gets saved into as a plain file (§8, "Two entries in Windows Clipboard History") | Empty disables it entirely; a stopgap for a Windows bug, meant to be removed once Microsoft fixes it |
+| `screenshot_backup_include_devices` | `true` | Whether `screenshot_backup_dir` also covers images synced in *from* the phone/tablet, not just laptop-native ones | `false` limits the backup to laptop screenshots only |
+| `screenshot_exclude_from_history` | `true` | Whether a device-synced image is written with `CanIncludeInClipboardHistory=0`, excluding it from Windows Clipboard History/Win+V (§8, "Two entries in Windows Clipboard History") | `false` lets synced screenshots appear in Win+V again, at the cost of the eviction-of-other-entries issue that motivated this flag in the first place (`bugs/BUG-005`) |
 
 ---
 
@@ -405,15 +408,119 @@ angle of the same bug.
 **ClipBridge orphan window.** *Symptom:* an extra "Shell pasted from your clipboard" toast
 right after disabling Tailscale on the phone. *Cause & fix:* §6.6.
 
+**Two entries in Windows Clipboard History (Win+V) per Win+Shift+S screenshot — ruled out
+as a CopyClip cause, not fixed here.** *Symptom:* a single Snipping Tool screenshot
+("copy to clipboard" enabled) appears twice in Win+V history. *Investigated because:*
+`core/hub.py`'s `_route()` (§ "Anatomy of a copy") never writes a clip back to the node it
+originated from, so CopyClip has no code path that could write a laptop-originated
+screenshot back onto the laptop's own clipboard a second time — but per this project's
+measure-before-concluding rule, that was confirmed rather than assumed. *Measured:*
+reproduced with CopyClip running under `--log-level DEBUG` (only one `laptop -> phone`
+delivery logged for the screenshot's content hash, no duplicate), then reproduced again
+with CopyClip **completely stopped** — Win+V still showed two entries with no CopyClip
+process running at all. *Confirmed root cause:* a known Windows 11 25H2 regression (this
+machine is on build 26200, matching community reports exactly) — with Snipping Tool's
+**"Automatically save original screenshots" and "Automatically copy changes to clipboard"
+both on**, each independently triggers its own clipboard write for the same capture. Not a
+CopyClip issue, not fixed in this repo. *Windows-side fix (confirmed working on this
+machine):* Snipping Tool's own Settings → turn off "Automatically save original
+screenshots", leave "Automatically copy changes to clipboard" on (CopyClip needs that one).
+No known way to keep both Snipping Tool settings on without the duplicate; worth checking
+for a Snipping Tool Store update periodically in case Microsoft patches it. *Follow-up:*
+turning off Windows' own auto-save loses the file it used to drop in
+`Pictures\Screenshots\Temporary Screenshots`, so `config.json`'s `screenshot_backup_dir`
+(§7) now has CopyClip replicate that save itself — for laptop-native screenshots and, via
+`screenshot_backup_include_devices`, ones synced in from the phone/tablet too. Remove that
+config once Microsoft fixes the underlying bug and Windows' own setting is safe to re-enable.
+*Second follow-up:* the local backup feature itself surfaced a real Android-side bug (a
+screenshot re-touched in place by a background process got re-pushed as if new — full
+writeup in `bugs/BUG-005-duplicate-screenshot-push.md`) plus a related Windows Clipboard
+History symptom, large device-synced images evicting the user's other Win+V entries.
+Neither is a CopyClip-caused clearing bug (confirmed: no code in this repo calls any
+clipboard-history API), but `config.json`'s `screenshot_exclude_from_history` (§7) now
+excludes device-synced images from History entirely as the only available fix, trading
+away that image's own Win+V visibility for not disturbing the rest of the user's history —
+see `bugs/BUG-005` for the full investigation, including why no way to have both exists.
+
 ---
 
-## 9. Logging & debugging
+## 9. Security & trust model
+
+Written up after a direct question: since this carries sensitive information daily, can a
+third party on the network read or inject clipboard content in transit? Short answer: not
+without either being a member of your own Tailscale tailnet or already holding an
+authorized adb key for one of your Samsung devices — but that protection comes entirely
+from Tailscale and adb, not from anything CopyClip's own wire protocol implements.
+
+**What actually protects the data:**
+
+- The laptop only ever dials *out*. Neither transport (`transports/adb_transport.py`,
+  `transports/tcp_transport.py`) ever binds or listens on a socket — there is no code path
+  by which an unsolicited connection reaches the laptop process at all.
+- Devices are addressed by fixed Tailscale IP (`config.json`'s `100.x.x.x` CGNAT-range
+  addresses), and all traffic to those addresses is carried inside Tailscale's WireGuard
+  tunnel. A device that isn't a member of your tailnet normally can't route packets to that
+  address space at all, so it sees nothing — not even encrypted packets to sniff.
+- `adb`'s own RSA-key trust model gates who can open a shell on either Samsung device in the
+  first place (a connecting host's key must already be authorized, or the user must tap
+  "Allow" on the unlocked device screen). This is what actually stops an arbitrary tailnet
+  peer from running `ClipBridge` even if it could route to the device.
+- `core/hub.py`'s domain/representative-election logic is entirely config-driven from the
+  two hardcoded `devices[]` entries in `config.json` — there's no runtime path for an
+  unlisted device to be treated as `phone` or `tab`.
+
+**What CopyClip does *not* add on top of that:**
+
+- The transport actually configured today, `transports/adb_transport.py` (Tier 1), sends
+  plain UTF-8 `SET`/`GET`/`DESC`/... lines with **no encryption and no authentication of its
+  own** — `android/ClipBridge.java`'s `serve()` executes any well-formed verb from stdin with
+  no credential check. It fully trusts the adb pipe it's handed. Payloads are base64-encoded
+  for safe transport, not for confidentiality — base64 is trivially reversible.
+- A second, more hardened transport already exists in the repo —
+  `transports/tcp_transport.py` + `transports/framing.py` (Tier 2), built for exactly this
+  concern — with real HMAC-SHA256 mutual authentication and replay protection. Its own
+  docstring is explicit about scope: it authorizes *within* the tailnet (stops another
+  tailnet peer from impersonating your phone/tablet); it is not encryption, since Tailscale
+  already provides that. It is not currently active — `config.json` has both devices on
+  `"transport": "adb"`.
+- Practical consequence: anyone who is already inside your Tailscale tailnet, or who already
+  holds an authorized adb key for either Samsung device, has full read/write access to
+  whatever CopyClip is syncing. CopyClip does not add its own second lock on that door.
+
+**A caveat worth knowing, not a CopyClip issue:** `adb tcpip 5555` makes each phone's `adbd`
+listen on TCP 5555 on *all* network interfaces, not just the Tailscale one — technically
+reachable from any device on the same Wi-Fi, bypassing Tailscale's routing restriction
+entirely. adb's key-authorization step still gates any actual shell access from there, but
+this is an Android/adb-level exposure CopyClip depends on and doesn't verify or harden.
+
+**Bottom line:** on a home network, a device that is neither a tailnet member nor already
+adb-authorized to your phone/tablet cannot read or inject your clips — but if you ever add a
+device to the tailnet, or authorize a new adb key, that device inherits full clipboard
+access with zero further gate from CopyClip itself.
+
+---
+
+## 10. Logging & debugging
 
 - Logs live in `logs/copyclip.log` (rotated at 2 MB, 3 backups kept — bounded disk use), set
   up in `copyclip.py`'s `setup_logging()`. Both `logs/` and `state/` are gitignored — nothing
   from either is ever committed.
 - Level is controlled by `config.json`'s `log_level` (default `INFO` — meant for the
-  AutoHotKey-launched production instance) or overridden per run with `--log-level DEBUG`.
+  production instance) or overridden per run with `--log-level DEBUG`.
+- **The production instance is launched by an external AutoHotkey setup, not by anything in
+  this repo.** `<software>\Programming\AutoHotKey\AllScripts\BasicTasks.ahk`'s auto-execute
+  section unconditionally force-restarts `copyclip.py` (via its `RestartNamedPythonServer()`
+  helper: kill any existing instance — matched by name if it's a previous run of this same
+  helper, or by command line for a leftover generic `pythonw.exe` — then relaunch hidden
+  under a per-project renamed copy of `pythonw.exe`, e.g. `CopyClip_Python.exe`, so Task
+  Manager's Name column identifies which process is which instead of showing two
+  indistinguishable `pythonw.exe` rows) every time that script loads. `BasicTasks.ahk` is one
+  of six scripts tracked by the loader `StartupScript.ahk`, which binds the *generic*
+  Win+Ctrl+Alt+R "reload all scripts" hotkey (`#^!R::gosub ReloadAll`) — reloading closes and
+  relaunches all six, CopyClip's restart is just the one with visible side effects (console
+  activity), which is why it can feel like the hotkey is CopyClip-specific when it isn't.
+  `core/single_instance.py`'s mutex is what makes this safe against overlapping with the
+  Task Scheduler autostart (`install_autostart.ps1`) firing around the same time.
 - **`Start CopyClip.bat`** — normal, quiet run (`INFO`).
 - **`Start CopyClip (Debug).bat`** — same script, `--log-level DEBUG`, for a testing
   session. One codebase, no duplication; DEBUG statements use lazy `%`-formatting so they
@@ -424,7 +531,7 @@ right after disabling Tailscale on the phone. *Cause & fix:* §6.6.
 
 ---
 
-## 10. File map
+## 11. File map
 
 See README's [Layout](README.md#layout) table for the quick version. The one addition worth
 calling out here: **`tests/`** — `test_core.py` is pure routing/dedup/outbox logic, no
@@ -434,7 +541,7 @@ hardware.
 
 ---
 
-## 11. Future scope: designed for, not built
+## 12. Future scope: designed for, not built
 
 This section exists so a future session doesn't have to rediscover the plan from scratch —
 it was already researched when the wire protocol and payload model were designed, even
@@ -475,7 +582,7 @@ way — this is exactly what the hub/node abstraction in §4 was built to make t
 
 ---
 
-## 12. Where to go for more
+## 13. Where to go for more
 
 - [README.md](README.md) — setup, config reference, troubleshooting, quick architecture
   diagram.

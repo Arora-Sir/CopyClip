@@ -39,6 +39,13 @@
   "max_image_bytes": 25165824,
   "image_chunk_bytes": 49152,
 
+  "_screenshot_backup": "Stopgap for a Windows 11 25H2 Snipping Tool bug: having both its own \"automatically save\" and \"automatically copy\" settings on double-writes the clipboard (see ARCHITECTURE.md's 'Two entries in Windows Clipboard History' note). With Windows' own auto-save turned off to fix that, this replicates the local file save instead -- for screenshots taken on the laptop AND, via screenshot_backup_include_devices, ones taken on the phone/tablet that sync here. Empty dir disables both. Remove once Microsoft fixes the underlying bug and Windows' own setting is safe to re-enable.",
+  "screenshot_backup_dir": "<home>\\Pictures\\Screenshots\\Temporary Screenshots",
+  "screenshot_backup_include_devices": true,
+
+  "_screenshot_exclude_from_history": "A large device-synced image was observed evicting other entries from Windows Clipboard History (Win+V) -- see bugs/BUG-005's Open points. Excluding it from History fixes that, at the cost of the synced image itself never appearing in the Win+V list (Ctrl+V still pastes it correctly either way -- this only affects History's own bookkeeping, not the live clipboard). Set to false to go back to showing synced images in Win+V history and accept the occasional eviction of other entries.",
+  "screenshot_exclude_from_history": true,
+
   "_adopt_on_connect": "false keeps a reconnect from overwriting what you just copied on the laptop with the device's older clip.",
   "adopt_on_connect": false,
 
