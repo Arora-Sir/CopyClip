@@ -13,6 +13,8 @@ in real use, not merely when a test passes.
 | [BUG-003](BUG-003-duplicate-daemon-instances.md) | Two daemons run at once: every laptop copy lands on the phone twice, and log lines go missing | High | **OPEN, fix applied, awaiting confirmation** |
 | [BUG-004](BUG-004-com-thread-init.md) | `CoCreateInstance` fails with `CO_E_NOTINITIALIZED` on some threads, silently dropping an incoming image | High (data loss) | **OPEN, fix applied, awaiting confirmation** |
 | [BUG-005](BUG-005-duplicate-screenshot-push.md) | A screenshot re-touched in place by a background process (media scanner, thumbnail regen, ...) gets re-pushed as if it were new | Medium-High | **OPEN, fix applied, awaiting confirmation** |
+| [BUG-006](BUG-006-restart-drops-baseline.md) | An AHK-triggered daemon restart silently drops the next phone/tablet clip as an unsynced "baseline" | High | **OPEN, fix applied, awaiting confirmation** |
+| [BUG-007](BUG-007-link-copy-mime-mislabeled.md) | A "copy link" clip (multiple declared mimes, e.g. `text/x-moz-url` + `text/plain`) is reported under the wrong mime and rejected as non-text | High | **OPEN, fix applied, awaiting confirmation** |
 
 ## Companion files
 

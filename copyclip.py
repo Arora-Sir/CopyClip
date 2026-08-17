@@ -25,6 +25,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+from core.baseline_store import BaselineStore   # noqa: E402
 from core.dedup import RecentClips              # noqa: E402
 from core.hub import Hub                        # noqa: E402
 from core.outbox import Outbox                  # noqa: E402
@@ -220,6 +221,7 @@ def build_hub(cfg: dict) -> Hub:
                       max_image_bytes=cfg["max_image_bytes"]),
         outbox=Outbox(os.path.join(HERE, cfg["state_dir"], "outbox.json")),
         dedup=RecentClips(ttl=cfg["dedup_ttl_s"]),
+        baseline_store=BaselineStore(os.path.join(HERE, cfg["state_dir"], "baseline.json")),
         adopt_on_connect=cfg.get("adopt_on_connect", False),
     )
     hub_ref["hub"] = hub

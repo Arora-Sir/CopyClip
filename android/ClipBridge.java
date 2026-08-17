@@ -495,6 +495,27 @@ public final class ClipBridge {
         return desc.getMimeType(0);
     }
 
+    /** The mime label to actually report for a clip already known to be text.
+     *
+     * A "copy link" action (browser address bar, share-sheet copy-link buttons, ...)
+     * commonly declares MULTIPLE mime types on one ClipData -- e.g.
+     * ["text/x-moz-url", "text/plain"] -- with the genuinely-syncable text/plain
+     * alternate present but not first. mimeOf() above only ever returns index 0, which
+     * would report "text/x-moz-url" even though real, syncable text is what actually
+     * gets extracted and sent (hasMimeType() below, unlike getMimeType(0), does not
+     * depend on array order). Reporting the raw index-0 label made the laptop's own
+     * text/plain-only policy (core/policy.py's TEXT_MIMES) reject a clip that was
+     * genuinely text the whole time -- see bugs/BUG-007 in the CopyClip repo. */
+    private static String reportedTextMime(ClipDescription desc) {
+        if (desc != null && desc.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) {
+            return ClipDescription.MIMETYPE_TEXT_PLAIN;
+        }
+        if (desc != null && desc.hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML)) {
+            return ClipDescription.MIMETYPE_TEXT_HTML;
+        }
+        return mimeOf(desc); // not text-shaped; unchanged fallback
+    }
+
     /**
      * Announce the current clip as metadata only: mime, sensitivity, timestamp, content
      * hash and length. No payload.
@@ -530,7 +551,7 @@ public final class ClipBridge {
         if (hash.equals(suppressHash)) {
             return; // our own write coming back around
         }
-        emit("DESC " + mime + " 0 " + (desc == null ? 0L : desc.getTimestamp())
+        emit("DESC " + reportedTextMime(desc) + " 0 " + (desc == null ? 0L : desc.getTimestamp())
                 + " " + hash + " " + text.length());
     }
 
@@ -574,7 +595,7 @@ public final class ClipBridge {
         if (!force && hash.equals(suppressHash)) {
             return null; // our own write coming back around
         }
-        emit("CLIP " + mime + " " + (isSensitive(desc) ? 1 : 0) + " "
+        emit("CLIP " + reportedTextMime(desc) + " " + (isSensitive(desc) ? 1 : 0) + " "
                 + Base64.getEncoder().encodeToString(text.getBytes(StandardCharsets.UTF_8)));
         return hash;
     }

@@ -522,6 +522,70 @@ def test_domain_delivery_already_satisfied_is_not_requeued():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_hub_restart_survives_baseline_drop():
+    """Regression: core/hub.py's baseline-adoption-on-first-connect used to be purely
+    in-memory (`_baselined`), so a fresh process -- including a spurious restart of an
+    already-healthy daemon -- treated a device's current clip as never-seen-before and
+    silently dropped it instead of syncing it. Measured live: AHK relaunching CopyClip
+    mid-session dropped a clip this way twice in the same boot.
+
+    A BaselineStore backed by the same on-disk file across three separate Hub instances
+    simulates the daemon dying and restarting: each later Hub has no in-memory knowledge
+    of the earlier one's state, only what was persisted to disk.
+    """
+    from core.baseline_store import BaselineStore
+    from core.hub import Hub
+
+    tmp = tempfile.mkdtemp(prefix="copyclip-restartbaseline-")
+    try:
+        baseline_path = os.path.join(tmp, "baseline.json")
+
+        # -- "boot 1": daemon starts, phone connects, syncs one clip normally.
+        laptop1, phone1 = FakeNode("laptop"), FakeNode("phone")
+        ob1 = Outbox(os.path.join(tmp, "outbox1.json"))
+        hub1 = Hub(nodes=[laptop1, phone1], domains=[], policy=Policy(), outbox=ob1,
+                   baseline_store=BaselineStore(baseline_path))
+        hub1.on_node_connected(phone1)
+        p1 = ClipPayload.from_text("first thing copied on phone", origin="phone")
+        hub1.on_clip(p1)
+        check("boot 1: first-ever connect drops the clip as baseline (no prior record)",
+              len(laptop1.writes) == 0)
+
+        p2 = ClipPayload.from_text("second thing, copied normally after connect",
+                                    origin="phone")
+        hub1.on_clip(p2)
+        check("boot 1: a later clip on the same connection syncs normally",
+              len(laptop1.writes) == 1 and laptop1.writes[0].text == p2.text)
+
+        # -- daemon restarts (e.g. AHK relaunching it). New process, new Hub, new
+        # in-memory state -- but the SAME on-disk baseline file.
+        laptop2, phone2 = FakeNode("laptop"), FakeNode("phone")
+        ob2 = Outbox(os.path.join(tmp, "outbox2.json"))
+        hub2 = Hub(nodes=[laptop2, phone2], domains=[], policy=Policy(), outbox=ob2,
+                   baseline_store=BaselineStore(baseline_path))
+        hub2.on_node_connected(phone2)
+
+        # Phone's clip is unchanged since boot 1 (still p2's text) -- nothing new to sync.
+        hub2.on_clip(ClipPayload.from_text(p2.text, origin="phone"))
+        check("boot 2: unchanged content since the last record is correctly skipped, "
+              "not re-treated as a fresh sync", len(laptop2.writes) == 0)
+
+        # -- daemon restarts again. This time something WAS copied on the phone while it
+        # was down/mid-restart, so the very next thing seen from phone is genuinely new.
+        laptop3, phone3 = FakeNode("laptop"), FakeNode("phone")
+        ob3 = Outbox(os.path.join(tmp, "outbox3.json"))
+        hub3 = Hub(nodes=[laptop3, phone3], domains=[], policy=Policy(), outbox=ob3,
+                   baseline_store=BaselineStore(baseline_path))
+        hub3.on_node_connected(phone3)
+        p3 = ClipPayload.from_text("copied while the daemon was restarting", origin="phone")
+        hub3.on_clip(p3)
+        check("boot 3: a clip that changed while the daemon was down is applied, "
+              "not silently dropped as a baseline",
+              len(laptop3.writes) == 1 and laptop3.writes[0].text == p3.text)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_drain_outbox_serializes_with_route_lock():
     """Regression: _drain_outbox() used to run without route_lock held, so a tick-thread
     retry could race a concurrently in-flight on_clip()-triggered write to the same node --
@@ -829,6 +893,7 @@ def main() -> int:
                      ("hub-repeat-copy", test_repeat_copy_reaches_node_missed_by_first_delivery),
                      ("hub-no-double-queue", test_domain_failure_queues_once_not_twice),
                      ("hub-already-satisfied", test_domain_delivery_already_satisfied_is_not_requeued),
+                     ("hub-restart-baseline", test_hub_restart_survives_baseline_drop),
                      ("hub-drain-lock", test_drain_outbox_serializes_with_route_lock),
                      ("single-instance", test_single_instance),
                      ("winclip", test_winclip_concurrency),
