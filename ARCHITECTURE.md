@@ -146,7 +146,9 @@ being falsely marked "delivered" and later either lost or delivered stale.
 
 One line per frame, `\n`-terminated, base64 for any payload. Defined authoritatively in
 `ClipBridge.java`'s own top-of-file doc comment; handled on the Python side in
-`AndroidNode._handle()`.
+`AndroidNode._handle()`. This verb set is unchanged by Tier 2's HMAC framing (`framing.py`)
+or its optional TLS wrap (§9a) — both operate one layer below this table, wrapping and
+unwrapping whole lines transparently, never adding or removing a verb.
 
 | Direction | Verb | Meaning |
 | :--- | :--- | :--- |
@@ -350,6 +352,12 @@ you toggle Tailscale back on, you may wait anywhere up to the current backoff in
 however long Tailscale itself takes to re-establish its tunnel — commonly under a minute,
 sometimes a bit over. This is a real, known, and currently accepted tradeoff, not a bug.
 
+This backoff governs a *reconnect within one daemon process*. A full process restart (the
+daemon dying and a new one starting) is a different case, covered by `core/baseline_store.py`
+(§10, BUG-006) rather than by this backoff — without it, a device's clip could survive the
+backoff/reconnect fine and still be silently dropped, because the new process had no memory
+of what the previous one already knew.
+
 ---
 
 ## 7. Tuning knobs
@@ -375,6 +383,9 @@ reason — changing one is a real tradeoff, not a free lunch.
 | `screenshot_backup_dir` | `""` (off) | Local folder every image clip also gets saved into as a plain file (§8, "Two entries in Windows Clipboard History") | Empty disables it entirely; a stopgap for a Windows bug, meant to be removed once Microsoft fixes it |
 | `screenshot_backup_include_devices` | `true` | Whether `screenshot_backup_dir` also covers images synced in *from* the phone/tablet, not just laptop-native ones | `false` limits the backup to laptop screenshots only |
 | `screenshot_exclude_from_history` | `true` | Whether a device-synced image is written with `CanIncludeInClipboardHistory=0`, excluding it from Windows Clipboard History/Win+V (§8, "Two entries in Windows Clipboard History") | `false` lets synced screenshots appear in Win+V again, at the cost of the eviction-of-other-entries issue that motivated this flag in the first place (`bugs/BUG-005`) |
+| `tls_cert_file` (top-level) | `null` (off) | Pinned self-signed cert (PEM) for Tier 2's optional TLS wrap (§9a) | `null` keeps Tier 2 exactly as before (HMAC-only, relies on Tailscale for confidentiality); set once `lan_host` is provisioned, not before |
+| `lan_host` (per device) | unset | A same-WiFi fallback address, tried after the device's normal Tailscale/`tcp_host` address fails (§9a) | Only meaningful with `tls_cert_file` also set; per `transports/tcp_transport.py`, do not set this without TLS |
+| `tcp_primary_timeout_s` | 5.0 | How long the *first* Tier 2 connection candidate is given before trying `lan_host` (§9a) | Lower = faster fallback when Tailscale is genuinely down, at the cost of possibly abandoning a slow-but-fine Tailscale connection prematurely |
 
 ---
 
@@ -478,11 +489,12 @@ from Tailscale and adb, not from anything CopyClip's own wire protocol implement
   for safe transport, not for confidentiality — base64 is trivially reversible.
 - A second, more hardened transport already exists in the repo —
   `transports/tcp_transport.py` + `transports/framing.py` (Tier 2), built for exactly this
-  concern — with real HMAC-SHA256 mutual authentication and replay protection. Its own
-  docstring is explicit about scope: it authorizes *within* the tailnet (stops another
-  tailnet peer from impersonating your phone/tablet); it is not encryption, since Tailscale
-  already provides that. It is not currently active — `config.json` has both devices on
-  `"transport": "adb"`.
+  concern — with real HMAC-SHA256 mutual authentication and replay protection. On its own,
+  this is authorization, not encryption: it stops another tailnet peer from impersonating
+  your phone/tablet, relying on Tailscale's own WireGuard tunnel underneath it for
+  confidentiality. It is not currently active — `config.json` has both devices on
+  `"transport": "adb"`. §9a below covers the one case where this transport's own TLS wrap
+  (not Tailscale) is what provides confidentiality instead.
 - Practical consequence: anyone who is already inside your Tailscale tailnet, or who already
   holds an authorized adb key for either Samsung device, has full read/write access to
   whatever CopyClip is syncing. CopyClip does not add its own second lock on that door.
@@ -498,6 +510,46 @@ adb-authorized to your phone/tablet cannot read or inject your clips — but if 
 device to the tailnet, or authorize a new adb key, that device inherits full clipboard
 access with zero further gate from CopyClip itself.
 
+### 9a. Same-WiFi LAN fallback (Tier 2 + TLS)
+
+Built after Android's Doze mode was found to silently kill Tailscale's background
+connection for hours at a time (`tailscale status` showed the phone offline 4h, the tablet
+offline 4d, after nothing more than the phone sitting idle overnight — see the household's
+own incident, documented via `bugs/SPIKE-LAN-TLS-FALLBACK.md`). When Tailscale itself is
+down, none of §9's protections apply — there's no WireGuard tunnel to rely on. A same-WiFi
+fallback needs its own confidentiality, not just HMAC authorization.
+
+**What it adds:** `TcpTransport` (`transports/tcp_transport.py`) can try a device's normal
+Tailscale address first, then an optional `lan_host` (`config.json`, a static/DHCP-reserved
+LAN IP) if that fails. When `config.json`'s `tls_cert_file` is set, **every** candidate —
+Tailscale address or LAN address alike — is wrapped in TLS 1.2+ and verified against one
+pinned self-signed certificate (`ssl.load_verify_locations`, not a CA hierarchy — trust here
+means "is this the one specific cert I already provisioned," the same pre-shared-secret
+model `copyclip.key` already uses, not "does a certificate authority vouch for this name").
+`transports/framing.py`'s HMAC-SHA256 layer is unchanged and keeps running inside the TLS
+tunnel, as defense in depth.
+
+**What it does not do:** silently fall back to plaintext. A TLS handshake or
+cert-verification failure on a reachable host is treated as a hard error (`TransportError`),
+never as an excuse to try the next candidate as though it were an ordinary connection
+failure — a host answering with the wrong certificate is exactly the "someone else on the
+WiFi" scenario this exists to catch, not a transient blip to paper over.
+
+**Verified before being built** (`bugs/SPIKE-LAN-TLS-FALLBACK.md`): Termux's Python `ssl`
+module has real OpenSSL 3.0 bindings with TLS 1.3 support, and a real cert-pinned TLS
+handshake plus data round-trip works between the laptop and the phone over the actual LAN
+(not loopback). The tablet's `ssl` support was not checked and stays **OPEN, awaiting
+confirmation** before enabling this on that device.
+
+**Provisioning:** one shared self-signed keypair (not per-device) generated once with the
+laptop's `openssl` CLI, pushed to each phone/tablet's Termux home the same way `copyclip.key`
+already is (`adb push` → move into place → delete from `/sdcard`) — see
+`termux/setup_termux.md`.
+
+**Still off by default.** Neither device is on `"transport": "tcp"` today, `lan_host` isn't
+set on either device entry, and `tls_cert_file` is `null`. Turning this on is a deliberate,
+per-device opt-in, not a change in default behavior.
+
 ---
 
 ## 10. Logging & debugging
@@ -509,18 +561,34 @@ access with zero further gate from CopyClip itself.
   production instance) or overridden per run with `--log-level DEBUG`.
 - **The production instance is launched by an external AutoHotkey setup, not by anything in
   this repo.** `<software>\Programming\AutoHotKey\AllScripts\BasicTasks.ahk`'s auto-execute
-  section unconditionally force-restarts `copyclip.py` (via its `RestartNamedPythonServer()`
-  helper: kill any existing instance — matched by name if it's a previous run of this same
-  helper, or by command line for a leftover generic `pythonw.exe` — then relaunch hidden
-  under a per-project renamed copy of `pythonw.exe`, e.g. `CopyClip_Python.exe`, so Task
-  Manager's Name column identifies which process is which instead of showing two
-  indistinguishable `pythonw.exe` rows) every time that script loads. `BasicTasks.ahk` is one
-  of six scripts tracked by the loader `StartupScript.ahk`, which binds the *generic*
-  Win+Ctrl+Alt+R "reload all scripts" hotkey (`#^!R::gosub ReloadAll`) — reloading closes and
-  relaunches all six, CopyClip's restart is just the one with visible side effects (console
-  activity), which is why it can feel like the hotkey is CopyClip-specific when it isn't.
+  section restarts `copyclip.py` (via its `RestartNamedPythonServer()` helper: kill any
+  existing instance — matched by name if it's a previous run of this same helper, or by
+  command line for a leftover generic `pythonw.exe` — then relaunch hidden under a
+  per-project renamed copy of `pythonw.exe`, e.g. `CopyClip_Python.exe`, so Task Manager's
+  Name column identifies which process is which instead of showing two indistinguishable
+  `pythonw.exe` rows) every time that script loads. `BasicTasks.ahk` is one of six scripts
+  tracked by the loader `StartupScript.ahk`, which binds the *generic* Win+Ctrl+Alt+R
+  "reload all scripts" hotkey (`#^!R::gosub ReloadAll`) — reloading closes and relaunches
+  all six, CopyClip's restart is just the one with visible side effects (console activity),
+  which is why it can feel like the hotkey is CopyClip-specific when it isn't.
   `core/single_instance.py`'s mutex is what makes this safe against overlapping with the
   Task Scheduler autostart (`install_autostart.ps1`) firing around the same time.
+  `RestartNamedPythonServer()` now checks first whether a single, correctly-named instance
+  is already running and, if so, skips the kill+relaunch rather than doing it
+  unconditionally — see BUG-006: a restart resets `core/hub.py`'s in-memory notion of "have
+  I seen this device before," and used to make the very next clip from a device get
+  silently dropped as an unsynced "baseline" instead of applied, every single time AHK
+  reloaded for any reason, not just at boot.
+- **`core/hub.py`'s baseline-adoption-on-first-connect (§6, `on_node_connected()`) is now
+  durable across a daemon restart, not just in-memory for the process's lifetime.**
+  `core/baseline_store.py` persists the last-known content hash per device
+  (`state/baseline.json`, atomic-write, same pattern as `core/outbox.py`). On a fresh
+  process's first connect to a device, the stored hash tells "device unchanged since we
+  last recorded it" (correctly skip — nothing to sync) apart from "device's clip changed
+  while this daemon was not running" (apply it as a normal clip, not a dropped baseline).
+  Only a genuinely first-ever run (no stored record for that device at all) still adopts
+  silently without applying, exactly as before. See BUG-006 for the production log evidence
+  this was written against.
 - **`Start CopyClip.bat`** — normal, quiet run (`INFO`).
 - **`Start CopyClip (Debug).bat`** — same script, `--log-level DEBUG`, for a testing
   session. One codebase, no duplication; DEBUG statements use lazy `%`-formatting so they
@@ -560,6 +628,22 @@ sidecar). The pre-implementation device spike and its findings are in
 spike remain genuinely unverified in real use (reading a clip URI minted by a different
 app's provider; live visual paste confirmation across arbitrary third-party apps) — flip it
 once confirmed, matching this project's convention for BUG-001 through BUG-003.
+
+### Same-WiFi LAN fallback — built, off pending real-device confirmation
+
+No longer future scope. See §9a for the full design and `bugs/SPIKE-LAN-TLS-FALLBACK.md` for
+the pre-implementation spike (confirms Termux's `ssl` module does a real TLS 1.3 handshake
+and round-trip with the laptop over the phone's actual LAN). `transports/tcp_transport.py`'s
+multi-candidate `start()` and TLS wrap, and `termux/copyclip_node.py`'s matching server-side
+wrap, are the pieces that landed; Tier 1 (adb) and Tier 2's existing Tailscale-only behavior
+are both untouched when `lan_host`/`tls_cert_file` are left unset, which they are by default.
+
+Stays **OPEN, awaiting confirmation** before real use: the tablet's Termux `ssl` support was
+never checked (only the phone was), and the full real-device pass described in the
+implementation plan's Verification section (Tailscale deliberately disabled, a packet
+capture proving only ciphertext is on the wire, an unauthorized LAN device confirmed
+rejected) hasn't happened yet — this is code that compiles and passes its unit tests, not
+yet something confirmed working the way BUG-001 through BUG-007 eventually were.
 
 ### Files, via Taildrop handoff
 

@@ -26,6 +26,16 @@ in real use, not merely when a test passes.
   `app_process` as shell UID, with two real bugs found and fixed in the ported scrcpy code.
   Two sub-questions (visual paste confirmation, reading a third-party app's clip URI) are
   **OPEN, awaiting confirmation in real use**, same convention as the bugs below.
+- **[SPIKE-WINDOWS-CLIPBOARD-LISTENER.md](SPIKE-WINDOWS-CLIPBOARD-LISTENER.md)** — spike into
+  whether `winclip.ClipboardWatcher`'s `AddClipboardFormatListener` mechanism goes silent
+  after a Windows sleep/resume cycle. Did not reproduce across a real 7h17m sleep; the actual
+  cause of the reported sync failure turned out to be Android's Doze mode killing Tailscale's
+  background connection instead (see `SPIKE-LAN-TLS-FALLBACK.md`).
+- **[SPIKE-LAN-TLS-FALLBACK.md](SPIKE-LAN-TLS-FALLBACK.md)** — Phase 0 spike for wrapping
+  Tier 2 (Termux) in TLS as a same-WiFi fallback when Tailscale is unreachable. Confirms
+  Termux's Python `ssl` module does a real TLS 1.3 handshake, cert-pinned verification, and
+  data round-trip with the laptop over the real LAN. Tablet `ssl` support is **OPEN, awaiting
+  confirmation** — only the phone was tested.
 
 ## Conventions
 

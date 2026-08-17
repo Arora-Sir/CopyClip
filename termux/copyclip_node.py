@@ -9,9 +9,16 @@ Why this exists: wireless ADB does not survive a phone reboot on this device, bu
 does. Same dex and same protocol as the ADB tier, different pipe.
 
 Self-contained on purpose: framing is duplicated here rather than imported so this file can
-be copied to the phone on its own.
+be copied to the phone on its own. The optional TLS wrap below (--cert-file/--tls-key-file)
+is duplicated from transports/tcp_transport.py for the same reason -- see
+bugs/SPIKE-LAN-TLS-FALLBACK.md for why it exists (a same-WiFi fallback for when Tailscale
+itself drops, which has no WireGuard tunnel underneath to rely on for confidentiality) and
+transports/framing.py's docstring for how the two layers (TLS here, HMAC below) divide the
+work: this is the only place a certificate is provisioned, so if it's ever changed, mirror
+the change in _wrap_tls's counterpart in tcp_transport.py by hand.
 
     python copyclip_node.py --key-file ~/.copyclip.key
+    python copyclip_node.py --key-file ~/.copyclip.key --cert-file ~/.copyclip_tls.crt --tls-key-file ~/.copyclip_tls.key
 """
 
 from __future__ import annotations
@@ -22,12 +29,20 @@ import hmac
 import os
 import secrets
 import socket
+import ssl
 import subprocess
 import sys
 import threading
 
 DEFAULT_PORT = 8385
-DEX = os.path.expanduser("~/clipbridge.dex")
+# NOT ~/clipbridge.dex: that's inside Termux's own private, sandboxed app directory
+# (/data/data/com.termux/files/home), which `uid=2000` (shell -- what rish/Shizuku grants)
+# cannot read, confirmed live: `ls` on that path as the rish-granted shell returned
+# "Permission denied" even though Termux's own process can read it fine. app_process
+# aborted instantly trying to load a CLASSPATH it had no permission to open. /data/local/tmp
+# is world-readable and is exactly where transports/adb_transport.py already pushes this
+# same dex for Tier 1 -- same fix, same convention, confirmed working live.
+DEX = "/data/local/tmp/clipbridge.dex"
 MAIN = "me.mohit.copyclip.ClipBridge"
 
 
@@ -82,10 +97,23 @@ def spawn_bridge() -> subprocess.Popen:
     if not os.path.isfile(DEX):
         raise SystemExit(f"{DEX} missing. Push it from the laptop first (see setup_termux.md).")
     rish = find_rish()
-    cmd = f"CLASSPATH={DEX} app_process / {MAIN} serve"
-    return subprocess.Popen(["sh", rish, "-c", cmd],
+    # Passing the command as argv (`rish sh -c "..."` or `sh rish -c "..."`) never got further
+    # than rish's own "Entering shell..." banner, no matter how the args were shaped or
+    # quoted -- confirmed by hand at an interactive prompt too: running `~/rish` bare drops
+    # into an interactive shell (that exact banner), and only a command *typed into* that
+    # shell's stdin afterward actually ran. So this spawns rish with no arguments at all, and
+    # writes the real command to its stdin right after, exactly like typing it interactively
+    # -- argv-passing appears not to be a supported mode for this rish build/version at all.
+    proc = subprocess.Popen([rish],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, bufsize=0)
+                            stderr=subprocess.PIPE, bufsize=0)
+    # `CLASSPATH=... app_process ...` is POSIX env-assignment-prefix syntax -- needs a real
+    # shell to parse it, which is exactly what typing it into rish's own interactive shell
+    # (uid 2000) provides.
+    cmd = f"CLASSPATH={DEX} app_process / {MAIN} serve\n"
+    proc.stdin.write(cmd.encode())
+    proc.stdin.flush()
+    return proc
 
 
 def serve_client(conn: socket.socket, key: bytes) -> None:
@@ -114,21 +142,48 @@ def serve_client(conn: socket.socket, key: bytes) -> None:
     rx_seq = 0
     send_lock = threading.Lock()
 
+    # rish prints its own preamble (observed: "Entering shell...") on proc.stdout before our
+    # command's real output begins -- confirmed to land on stdout, not stderr, so it can't be
+    # split off by stream (see spawn_bridge()'s stderr comment, which turned out to only be
+    # half the fix). Discard anything before the first line that's actually a real ClipBridge
+    # verb; forward everything unconditionally after that, same as before this existed.
+    _DEVICE_VERBS = {"READY", "CLIP", "DESC", "STAMP", "ACK", "DEFER", "LOCK", "SKIP",
+                     "PONG", "ERR", "CLIPB", "CLIPC"}
+
     def pump_bridge_to_net() -> None:
         nonlocal tx_seq
+        seen_real_output = False
         try:
             for raw in proc.stdout:
                 payload = raw.decode("utf-8", "replace").rstrip("\r\n")
                 if not payload:
                     continue
+                if not seen_real_output:
+                    if payload.split(" ", 1)[0] not in _DEVICE_VERBS:
+                        print(f"[bridge preamble, discarded] {payload}", file=sys.stderr)
+                        continue
+                    seen_real_output = True
                 with send_lock:
                     tx_seq += 1
                     f.write((seal(key, tx_seq, payload) + "\n").encode())
         except Exception as exc:
             print(f"bridge->net ended: {exc}", file=sys.stderr)
 
+    def drain_bridge_stderr() -> None:
+        # rish's own banner and any real ClipBridge crash output land here now -- printed
+        # locally for whoever is watching this Termux session, never forwarded as protocol
+        # data (that's the bug this split fixed; see spawn_bridge()'s comment).
+        try:
+            for raw in proc.stderr:
+                text = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if text:
+                    print(f"[bridge stderr] {text}", file=sys.stderr)
+        except Exception:
+            pass
+
     t = threading.Thread(target=pump_bridge_to_net, daemon=True)
     t.start()
+    threading.Thread(target=drain_bridge_stderr, daemon=True).start()
 
     try:
         for raw in f:
@@ -157,10 +212,22 @@ def serve_client(conn: socket.socket, key: bytes) -> None:
             pass
 
 
+def build_tls_context(cert_file: str, key_file: str) -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert_file, key_file)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    return ctx
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--key-file", default=os.path.expanduser("~/.copyclip.key"))
+    ap.add_argument("--cert-file", default=os.path.expanduser("~/.copyclip_tls.crt"),
+                    help="TLS cert (PEM). If this and --tls-key-file both exist, every "
+                         "connection is TLS-wrapped -- required once this node is reachable "
+                         "other than through Tailscale (see module docstring).")
+    ap.add_argument("--tls-key-file", default=os.path.expanduser("~/.copyclip_tls.key"))
     args = ap.parse_args()
 
     if not os.path.isfile(args.key_file):
@@ -168,6 +235,14 @@ def main() -> int:
     key = open(args.key_file, "rb").read().strip()
     if len(key) < 32:
         raise SystemExit("key is too short; use at least 32 bytes")
+
+    tls_ctx: "ssl.SSLContext | None" = None
+    if os.path.isfile(args.cert_file) and os.path.isfile(args.tls_key_file):
+        tls_ctx = build_tls_context(args.cert_file, args.tls_key_file)
+        print(f"TLS enabled ({ssl.OPENSSL_VERSION})", flush=True)
+    else:
+        print("TLS not configured (cert/key file missing) -- HMAC-only, safe only when "
+              "reached over Tailscale", flush=True)
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -179,6 +254,13 @@ def main() -> int:
     while True:
         conn, addr = srv.accept()
         print(f"client {addr[0]}", flush=True)
+        if tls_ctx is not None:
+            try:
+                conn = tls_ctx.wrap_socket(conn, server_side=True)
+            except ssl.SSLError as exc:
+                print(f"TLS handshake failed, dropping client: {exc}", file=sys.stderr)
+                conn.close()
+                continue
         # One client at a time: a second would fight over the same clipboard.
         try:
             serve_client(conn, key)

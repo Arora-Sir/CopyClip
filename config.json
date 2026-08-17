@@ -30,6 +30,10 @@
   "key_file": "copyclip.key",
   "state_dir": "state",
 
+  "_lan_fallback": "Tier 2 (transport: tcp) only. lan_host is an optional per-device same-WiFi fallback address, tried after the device's normal `device`/tcp_host address fails -- see bugs/SPIKE-LAN-TLS-FALLBACK.md. Set tls_cert_file before using lan_host for real: it has no Tailscale tunnel underneath it, so without TLS anyone on the same WiFi could read or inject clips. Once tls_cert_file IS set, TcpTransport wraps every candidate (including the normal Tailscale address) in TLS and never falls back to a plaintext socket on a handshake/cert failure -- see transports/tcp_transport.py's start(). Neither device is on transport:tcp today, so none of this is active yet.",
+  "tls_cert_file": "copyclip_tls.pem",
+  "tcp_primary_timeout_s": 5.0,
+
   "max_chars": 800000,
   "denylist_regex": [],
   "allow_non_text": false,

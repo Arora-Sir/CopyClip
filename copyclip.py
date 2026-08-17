@@ -156,7 +156,17 @@ def make_transport_factory(cfg: dict, dev: dict):
             raise TransportError("key file is too short; use at least 32 bytes")
         host = dev.get("tcp_host") or dev["device"].split(":")[0]
         port = int(dev.get("tcp_port") or 8385)
-        return lambda: TcpTransport(host, port, key)
+        lan_host = dev.get("lan_host")
+        tls_cert_file = cfg.get("tls_cert_file")
+        if tls_cert_file:
+            tls_cert_file = os.path.join(HERE, tls_cert_file)
+        primary_timeout_s = cfg.get("tcp_primary_timeout_s", 5.0)
+        return lambda: TcpTransport(
+            host, port, key,
+            fallback_hosts=(lan_host,) if lan_host else (),
+            primary_timeout_s=primary_timeout_s,
+            tls_cert_file=tls_cert_file,
+        )
 
     raise TransportError(f"unknown transport {kind!r} for device {dev.get('name')!r}")
 

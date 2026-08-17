@@ -1,9 +1,14 @@
 """HMAC framing for the TCP tier.
 
-Tailscale already gives WireGuard-grade confidentiality and integrity between nodes, so
-this is not about encryption. It is about authorisation *within* the tailnet: without it,
-any other device on the tailnet could inject clipboard content into this machine or read
-what is being synced. The key turns "anyone on my tailnet" into "the one paired device".
+This is about authorisation, not encryption: without it, any other device able to reach the
+socket could inject clipboard content into this machine or replay/reorder a captured frame.
+The key turns "anyone who can reach this port" into "the one paired device". Whether the
+bytes on the wire are also confidential depends on what carries this framing underneath --
+Tailscale's WireGuard tunnel already gives that when the peer is reached by its tailnet
+address, and `TcpTransport`'s optional TLS wrap (`tls_cert_file`) gives the same guarantee
+when reached by a same-WiFi `lan_host` fallback with no Tailscale involved. Either way, this
+module's own job stays the same: authorisation and anti-replay, layered on top of whatever
+confidentiality (or none) the transport underneath happens to provide.
 
 Wire format, one frame per line:
 

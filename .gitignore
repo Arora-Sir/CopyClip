@@ -5,6 +5,12 @@ copyclip.key
 *.key
 !*.pub
 
+# The real device's pinned TLS cert for Tier 2's same-WiFi fallback (config.json's
+# tls_cert_file) -- device-specific, regenerable via setup_termux.md step 4a, not something
+# another machine's config should inherit. Throwaway spike certs (spike/*_probe.pem) are not
+# covered by this and are fine to commit -- they're not the real deployment cert.
+copyclip_tls.pem
+
 # --- build output --------------------------------------------------------
 # clipbridge.dex is generated from android/ClipBridge.java by android/build_dex.ps1.
 # The Java source is tracked; the artifact is rebuilt in one command, and a stale
@@ -47,6 +53,11 @@ venv/
 # Base64 clipboard dumps made while testing. These can contain whatever was on your
 # clipboard at the time, so they must never be committed.
 *.b64
+
+# --- spike diagnostics -----------------------------------------------------
+# Live phone screenshots taken while debugging a spike (e.g. Termux session state) --
+# useful in the moment, not reusable afterward, and can show whatever else was on screen.
+spike/phone_screen*.png
 
 # --- os / editor ---------------------------------------------------------
 Thumbs.db

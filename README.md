@@ -177,7 +177,9 @@ script in this folder.
 
 | Key | Meaning |
 | :--- | :--- |
-| `devices[]` | `name`, `transport` (`adb` or `tcp`), `device` (Tailscale IP and port), `enabled` |
+| `devices[]` | `name`, `transport` (`adb` or `tcp`), `device` (Tailscale IP and port), `enabled`; `tcp`-transport devices can also set `lan_host`, a same-WiFi fallback address tried when Tailscale itself is unreachable — see [ARCHITECTURE.md §9a](ARCHITECTURE.md#9a-same-wifi-lan-fallback-tier-2--tls) |
+| `tls_cert_file` | Pinned self-signed cert (PEM) that turns on TLS for Tier 2, required before `lan_host` is safe to use (no Tailscale tunnel to rely on otherwise). `null` (default) keeps Tier 2 exactly as before |
+| `tcp_primary_timeout_s` | How long the first Tier 2 connection candidate is given before trying `lan_host`. Default `5.0` |
 | `domains[]` | Devices that mirror each other by themselves. `grace_s` is how long Continuity gets before a probe counts as missed; `fail_threshold` misses flips to direct writes |
 | `max_chars` | Oversized clips are **skipped and logged**, never truncated |
 | `adopt_on_connect` | `false` stops a reconnect from overwriting what you just copied on the laptop with a device's older clip |
