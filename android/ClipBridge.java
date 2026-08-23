@@ -492,6 +492,21 @@ public final class ClipBridge {
         if (desc == null || desc.getMimeTypeCount() == 0) {
             return "unknown";
         }
+        // A ClipDescription can declare several representations of the same item, and
+        // Android does not order them "plain text first" -- e.g. the system Sharesheet's
+        // built-in "Copy" target on a URL declares ["text/x-moz-url", "text/plain"], first
+        // slot first. getMimeType(0) alone reported that non-standard first slot, which
+        // getText() (used unconditionally below and in emitCurrentClip()) resolves to the
+        // clean URL regardless -- but core/policy.py's TEXT_MIMES only recognises the
+        // literal strings "text/plain"/"text/html", so a perfectly good link was reported
+        // under a mime the laptop had never heard of and silently rejected as non-text. See
+        // bugs/BUG-007-long-link-copy-rejected-as-non-text.md.
+        if (desc.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) {
+            return ClipDescription.MIMETYPE_TEXT_PLAIN;
+        }
+        if (desc.hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML)) {
+            return ClipDescription.MIMETYPE_TEXT_HTML;
+        }
         return desc.getMimeType(0);
     }
 
@@ -514,7 +529,16 @@ public final class ClipBridge {
             return;
         }
         if (isImageMime(mime)) {
-            emitImageDesc(desc);
+            if (System.currentTimeMillis() - lastScreenshotEmitMs < IMAGE_DESC_HOLD_MS) {
+                return; // a real screenshot just went out; this is almost certainly its
+                        // spurious clipboard-preview sibling (see IMAGE_DESC_HOLD_MS above)
+            }
+            // Held rather than announced immediately: checkScreenshots() runs every poll
+            // tick and may still supersede this in the next tick or two if it turns out to
+            // be that same spurious sibling arriving *before* the real file (see the main
+            // loop's resolution of pendingImageDesc).
+            pendingImageDesc = desc;
+            pendingImageDescSinceMs = System.currentTimeMillis();
             return;
         }
         ClipData clip = getClip();
@@ -601,6 +625,23 @@ public final class ClipBridge {
                 // getPrimaryClip(). Runs every tick regardless of stampOnly too -- see
                 // checkScreenshots()'s own comment for why.
                 checkScreenshots();
+
+                // Resolve a held image DESC (see emitDesc()): checkScreenshots() above just
+                // ran, so if it turned out to be the real file for this same screenshot,
+                // lastScreenshotEmitMs has already moved past pendingImageDescSinceMs and
+                // this candidate is dropped, never announced to the laptop at all. Otherwise
+                // it is genuinely unrelated to any screenshot and is released once the hold
+                // window passes.
+                if (pendingImageDesc != null) {
+                    if (lastScreenshotEmitMs >= pendingImageDescSinceMs) {
+                        pendingImageDesc = null;
+                    } else if (System.currentTimeMillis() - pendingImageDescSinceMs
+                            >= IMAGE_DESC_HOLD_MS) {
+                        ClipDescription held = pendingImageDesc;
+                        pendingImageDesc = null;
+                        emitImageDesc(held);
+                    }
+                }
 
                 boolean locked = isLocked();
                 if (locked != lastLocked) {
@@ -1036,6 +1077,30 @@ public final class ClipBridge {
         return last != null && (now - last) < SCREENSHOT_DEDUP_WINDOW_MS;
     }
 
+    // Coordinates checkScreenshots() (the file watcher) with the ordinary clipboard-image
+    // path (emitDesc()/emitImageDesc()) -- see bugs/BUG-006-duplicate-screenshot-clipboard-
+    // preview.md. Measured on this device: taking a screenshot reliably produces the real
+    // file AND, separately, a second, much smaller image on the ordinary clipboard, 0-2s
+    // apart in either order -- traced to a companion app's own screenshot-notification
+    // handling (a small preview bitmap from the system "Screenshot captured" notification),
+    // not anything CopyClip does. The two never share a content hash, so the existing
+    // hash-based dedups above cannot tell them apart, and neither can a laptop-side size
+    // comparison -- that would also collapse two genuinely different images a user
+    // deliberately copies close together, which core/dedup.py's own test suite explicitly
+    // protects (a different image must always get its own sync, regardless of timing).
+    // This coordinates from the one place that actually knows which path an image came
+    // from, instead of guessing from content on the other end of the wire.
+    private static long lastScreenshotEmitMs = 0L;
+    private static ClipDescription pendingImageDesc;
+    private static long pendingImageDescSinceMs;
+    // Comfortably above the largest gap measured between the real file and the spurious
+    // second clipboard image (~2s); short enough that a genuine standalone image copy is
+    // barely delayed. Known, accepted trade-off: two genuinely different images copied
+    // deliberately less than this far apart on the SAME device, with no screenshot
+    // involved at all, would have the first one superseded -- judged unlikely relative to
+    // how often a screenshot is actually taken (see the bug writeup for the reasoning).
+    private static final long IMAGE_DESC_HOLD_MS = 2_500;
+
     /**
      * Establishes the starting baseline silently -- called once before the poll loop
      * starts, so the newest screenshot already on disk when ClipBridge launches is never
@@ -1145,6 +1210,11 @@ public final class ClipBridge {
         if (recentlyPushedScreenshot(hash)) {
             return; // same visual content pushed moments ago under a different filename
         }
+        // A held or about-to-arrive ordinary-clipboard image (see emitDesc()) is very
+        // likely this same real screenshot surfacing a second time, not a deliberate
+        // separate copy -- the real file always wins, so drop the candidate outright.
+        lastScreenshotEmitMs = System.currentTimeMillis();
+        pendingImageDesc = null;
         sendChunkedClip(outMime, false, hash, data);
     }
 

@@ -339,6 +339,38 @@ periods between copies) is necessarily longer than that gap. Closing that narrow
 would need the OS to notice the network loss faster, which isn't something this process
 controls.
 
+### 6.6b Screenshot-vs-clipboard-image race suppression
+
+A companion app installed alongside CopyClip (Sefirah) turned out to place a small preview
+image on the real Android clipboard around the moment a screenshot is taken — independent of
+any of its own "sync to PC" toggles, most likely a side effect of its notification listener
+reacting to Android's own "Screenshot captured" system notification via its clipboard
+accessibility service (see `bugs/BUG-006` for the full investigation). `checkScreenshots()`
+(§6.6a's sibling, the file-based watcher) correctly pushes the real screenshot file; the
+ordinary clipboard-image path (`emitDesc()`/`emitImageDesc()`) — needed for real, deliberate
+image copies and otherwise working exactly as designed — has no way to tell this preview
+apart from a genuine copy, and forwarded it too, producing two device-synced images (and,
+via `screenshot_backup_dir`, two backup files) for one real capture.
+
+The two never share a content hash, so neither the existing per-node dedup nor a
+laptop-side size comparison can safely tell them apart — the latter was considered and
+rejected because it would also collapse two genuinely different images a user deliberately
+copies close together, which `tests/test_core.py::test_screenshot_backup` explicitly
+protects against by design. Android is the only place that still knows which code path an
+image came from, so the fix lives entirely in `ClipBridge.java`: `emitScreenshot()` stamps
+`lastScreenshotEmitMs` right before actually sending the real file; the ordinary
+clipboard-image path checks that stamp first (catching the "real file, then spurious
+preview" ordering with no delay) and otherwise holds the candidate briefly
+(`pendingImageDesc`/`pendingImageDescSinceMs`, resolved every poll tick) so a real screenshot
+that follows within `IMAGE_DESC_HOLD_MS` can still supersede it (catching the "spurious
+preview, then real file" ordering — the more commonly observed one). **Known, accepted
+trade-off:** two genuinely different images copied deliberately less than
+`IMAGE_DESC_HOLD_MS` apart on the same device, with no screenshot involved at all, would have
+the first one silently superseded. This is a defense-in-depth layer, not the real fix — the
+actual root cause is Sefirah's clipboard accessibility service, and disabling that
+permission (Settings → Accessibility → Sefirah) removes the problem at the source with no
+trade-off at all.
+
 ### 6.7 Reconnect backoff
 
 Each device's `AndroidNode` supervises its own connection independently (one device
@@ -367,6 +399,7 @@ reason — changing one is a real tradeoff, not a free lunch.
 | `dedup_ttl_s` | 90.0 | How long a delivered-content record is remembered per node | Longer than Samsung's ~2.5s relay by a wide margin; short enough that deliberately re-copying the same text later still syncs |
 | `tick_s` | 2.0 (hardcoded in `core/hub.py`) | How often the hub retries the outbox and re-checks domain health | Rarely worth changing |
 | `IDLE_ORPHAN_MS` | 100,000 (hardcoded in `android/ClipBridge.java`) | How long `ClipBridge` can go without hearing from the laptop before suppressing content reads (§6.6) | Must stay comfortably above `idle_ping_s` + its grace window or a healthy-but-quiet connection will falsely trip it |
+| `IMAGE_DESC_HOLD_MS` | 2,500 (hardcoded in `android/ClipBridge.java`) | How long an ordinary clipboard-sourced image is held before being announced, so a real screenshot file push (in either order) can supersede it (§6.6b, `bugs/BUG-006`) | Lower = less delay on a genuine standalone image copy, but less time for a slow screenshot-folder poll tick to catch up; higher = safer against the race, more delay, and a bigger window where two genuinely distinct rapid image copies could collapse into one |
 | `grace_s` (per domain) | 8.0 | How long a Continuity confirmation probe is given before counting as a miss (§6.5) | Above Samsung's measured ~2.5s relay by a wide margin |
 | `fail_threshold` (per domain) | 3 | Consecutive missed confirmations before a domain is marked degraded (§6.5) | Lower = faster fallback to direct writes, more sensitive to one-off blips |
 | `allow_images` | `false` | Whether image clips sync at all (§6.6a) | Defaults off pending real-use confirmation of bugs/SPIKE-IMAGE-CLIPBOARD.md's open Q5/Q7; flip once confirmed |
@@ -441,6 +474,50 @@ clipboard-history API), but `config.json`'s `screenshot_exclude_from_history` (�
 excludes device-synced images from History entirely as the only available fix, trading
 away that image's own Win+V visibility for not disturbing the rest of the user's history —
 see `bugs/BUG-005` for the full investigation, including why no way to have both exists.
+
+**(2026-08-22) A companion app's clipboard accessibility service caused a second,
+spurious backup file per phone screenshot.** *Symptom:* one phone screenshot produced two
+files in `screenshot_backup_dir` — a small one and the real, much larger one, 0-2s apart in
+either order. *Investigated because:* the user noticed it during real use and asked for a
+live, device-measured investigation rather than a guess, per this project's own rule.
+*Measured:* `adb shell ls` on `/sdcard/DCIM/Screenshots` showed only one real file per
+capture, matching the *large* half of each pair byte-for-byte; the small half had no
+on-disk file at all, so it never went through `checkScreenshots()`. `adb logcat` ruled out
+Samsung's own screenshot-editor app explicitly setting the clipboard (its clipboard-set
+signature never named it, and never fired near the small image's timestamp), then
+`adb shell dumpsys package com.castle.sefirah` found the actual mechanism: Sefirah (a
+companion app installed five days earlier, after this file's own "screenshots don't touch
+setPrimaryClip" measurement was written) declares its clipboard listener as an
+`AccessibilityService` — one of the caller types Android exempts from the normal
+background-clipboard restriction — independent of its own "sync to PC" toggles, which the
+user had already turned off. *Root cause:* strongly indicated, not caught red-handed (an
+accessibility service's internal calls don't surface distinctly in logcat) — most likely
+Sefirah's notification listener reacting to Android's own "Screenshot captured" system
+notification (which carries a small preview bitmap) and placing that preview on the real
+clipboard via its accessibility service. *Fix:* §6.6b — a defense-in-depth timing
+coordination in `ClipBridge.java` between the file watcher and the ordinary clipboard-image
+path, since the real fix (disabling Sefirah's Accessibility Service permission) is a device
+setting, not something this codebase can apply. Full writeup:
+`bugs/BUG-006-screenshot-clipboard-preview-duplicate.md`.
+
+**(2026-08-23) Copying a link (not plain-selected text) on the phone never reached the
+laptop.** *Symptom:* ordinary copied text always synced; a long URL copied via a "Copy
+link"-style action never appeared on the Windows clipboard, with nothing visibly wrong on
+either end. *Investigated because:* the user asked for a measured explanation rather than a
+guess, per this project's own rule. *Measured:* `logs/copyclip.log` at the production
+`INFO` level already contained the answer: `skip clip from phone: non-text
+(text/x-moz-url); v1 syncs text only`, twice, bracketing the user's own successful
+plain-text tests. *Root cause:* `ClipBridge.java`'s `mimeOf()` (§5) reported whichever mime
+type `ClipDescription.getMimeType(0)` happened to list first, and a link copy can declare a
+richer format (`text/x-moz-url`) ahead of the `text/plain` fallback it's also transmitted
+under. `emitCurrentClip()` already recognized and forwarded the content correctly via
+`getText()`, but labeled it with that first-listed mime, which `core/models.py`'s
+`TEXT_MIMES` (only the literal strings `"text/plain"`/`"text/html"`) doesn't recognize, so
+`core/policy.py` rejected perfectly good text purely over its label. *Fix:* `mimeOf()` now
+prefers `text/plain`/`text/html` whenever the source declares one, using the same
+`hasMimeType()` precedence `emitCurrentClip()`'s own accept/reject gate already relies on,
+one function, no wire protocol or config change. Full writeup, including what remains
+unconfirmed: `bugs/BUG-007-long-link-copy-rejected-as-non-text.md`.
 
 ---
 
