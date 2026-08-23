@@ -1,7 +1,7 @@
 # BUG-008: an AHK-triggered daemon restart silently drops the next clip as a "baseline"
 
 **Severity:** High, reproduces on ordinary use, no error surfaced anywhere
-**Status:** OPEN, fix applied, awaiting real-use confirmation
+**Status:** CONFIRMED, fixed in real use (2026-08-23)
 **Affects:** laptop; symptom appears as phone/tablet -> laptop sync "randomly not working",
 especially right after a laptop restart
 
@@ -139,11 +139,14 @@ the store reflects both directions.
 - The AHK-side guard's own effect is separately confirmed: no repeated `"CopyClip starting"`
   churn has been observed in `logs/copyclip.log` since 2026-08-18, consistent with it
   actually suppressing unnecessary restarts.
-- **Not yet confirmed live on `main`** (this repo's convention: stays OPEN until real use
-  confirms it, not just passing tests). Needs: with CopyClip running healthily, copy
-  something on the phone, force-kill the daemon (matching how it was deployed today), let it
-  restart, and confirm the clip lands on the laptop instead of being logged as
-  `"baseline ..., not applied"`.
+- **(2026-08-23, confirmed live)** Copied a link on the phone, killed the daemon, copied a
+  second, different link while it was down, restarted it. `logs\copyclip.log` shows
+  `[phone] clip changed while this daemon was not running (62 chars); syncing it now
+  instead of dropping it as a baseline` followed by `phone -> laptop: 62 chars`, and a
+  direct read of the live Windows clipboard (`tools\clipboard_probe.py`, not just the log)
+  confirmed the exact link, 62 chars, no corruption. Not a coincidence of timing: the
+  daemon was verifiably down (process killed, confirmed dead) when the second link was
+  copied, and the content that landed matches it exactly.
 
 ## Rollback
 
