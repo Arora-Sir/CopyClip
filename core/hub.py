@@ -25,6 +25,7 @@ import time
 from domains.sync_domain import SyncDomain
 from nodes.base import ClipboardNode
 
+from .baseline_store import BaselineStore
 from .dedup import RecentClips
 from .models import ClipDescriptor, ClipPayload, WriteResult
 from .outbox import Outbox
@@ -36,24 +37,32 @@ log = logging.getLogger("copyclip.hub")
 class Hub:
     def __init__(self, *, nodes: list[ClipboardNode], domains: list[SyncDomain],
                  policy: Policy, outbox: Outbox, dedup: RecentClips | None = None,
+                 baseline_store: BaselineStore | None = None,
                  tick_s: float = 2.0, adopt_on_connect: bool = False) -> None:
         self.nodes = {n.name: n for n in nodes}
         self.domains = domains
         self.policy = policy
         self.outbox = outbox
         self.dedup = dedup or RecentClips()
+        self.baseline_store = baseline_store
         self.tick_s = tick_s
         self.adopt_on_connect = adopt_on_connect
 
         self._stop = threading.Event()
         self._ticker: threading.Thread | None = None
         self._route_lock = threading.Lock()
-        # Nodes whose next observed clip is adopted as a starting point rather than applied.
-        # This must happen ONLY on the first connect of this daemon's life: at startup we
-        # have no idea whether the device's clip is newer than the laptop's, so clobbering
-        # is rude. On a later reconnect the opposite is true, and re-arming it there would
-        # silently swallow a clip copied while the link was down, which is precisely the
-        # catch-up this is supposed to deliver.
+        # Nodes whose next observed clip is a *candidate* for "adopt without applying"
+        # rather than "route as a normal clip". This must happen ONLY on the first connect
+        # of this daemon's life: at startup we have no idea whether the device's clip is
+        # newer than the laptop's, so clobbering is rude. On a later reconnect the opposite
+        # is true, and re-arming it there would silently swallow a clip copied while the
+        # link was down, which is precisely the catch-up this is supposed to deliver.
+        #
+        # "First connect of this daemon's life" resets on every process restart, though --
+        # including a spurious one -- so on_clip() below also checks baseline_store (if
+        # given one) to tell "genuinely first time we've ever seen this device" apart from
+        # "just restarted, and this device's clip actually changed while we were down",
+        # which must NOT be silently dropped.
         self._baseline_pending: set[str] = set()
         self._baselined: set[str] = set()
         self._last_stamp_node: str | None = None
@@ -171,15 +180,33 @@ class Hub:
             for d in self.domains:
                 d.note_observed(sha, source)
 
+            # Record what's now current on the source device regardless of how this clip
+            # ends up routed below -- this is the persisted memory that lets a later
+            # daemon restart tell "device unchanged since we last looked" apart from
+            # "device changed while we were down", see on_node_connected().
+            if self.baseline_store:
+                prior_hash = self.baseline_store.get(source)
+                self.baseline_store.set(source, sha)
+            else:
+                prior_hash = None
+
             if source in self._baseline_pending:
                 self._baseline_pending.discard(source)
-                if not self.adopt_on_connect:
-                    # Adopt as the shared starting point without applying it anywhere.
+                changed_while_away = prior_hash is not None and prior_hash != sha
+                if not self.adopt_on_connect and not changed_while_away:
+                    # Adopt as the shared starting point without applying it anywhere:
+                    # either this is genuinely the first time we have ever seen this
+                    # device (prior_hash is None), or its content matches what we last
+                    # recorded for it, so there is nothing new to sync either way.
                     for name in self.nodes:
                         self.dedup.mark_delivered(sha, name)
                     log.info("baseline from %s (%d chars), not applied",
                              source, payload.char_len)
                     return
+                if changed_while_away:
+                    log.info("[%s] clip changed while this daemon was not running "
+                              "(%d chars); syncing it now instead of dropping it as a "
+                              "baseline", source, payload.char_len)
 
             if is_new:
                 self.stats["observed"] += 1
@@ -288,6 +315,8 @@ class Hub:
             # Mark delivered on DEFERRED too: ClipBridge has taken custody and replays on
             # unlock, so re-sending later would double-apply.
             self.dedup.mark_delivered(sha, node.name)
+            if self.baseline_store:
+                self.baseline_store.set(node.name, sha)
             self.stats["delivered"] += 1
             log.info("%s -> %s: %d chars%s", display, node.name, payload.char_len,
                      " (queued on device until unlock)"

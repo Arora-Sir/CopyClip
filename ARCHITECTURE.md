@@ -519,6 +519,40 @@ prefers `text/plain`/`text/html` whenever the source declares one, using the sam
 one function, no wire protocol or config change. Full writeup, including what remains
 unconfirmed: `bugs/BUG-007-long-link-copy-rejected-as-non-text.md`.
 
+**(2026-08-23) A whole unmerged branch, `feature/lan-fallback-tls`, turned up during
+cleanup of leftover files from the same investigation.** *Context:* while reviewing loose,
+untracked TLS-spike files sitting in the working tree, `git branch -a` surfaced a real,
+substantial, already-tested branch from 2026-08-18 that had never been merged: a same-WiFi
+TLS fallback feature (see this file's own Future Scope section) bundled with two unrelated
+bug fixes from the same session. One of those, a link-copy mime mislabeling fix, was already
+independently rediscovered and fixed on `main` the same day as this cleanup (BUG-007 above);
+the other, a High-severity daemon-restart data-loss bug, was not. *Action:* the loose,
+superseded spike files were deleted (both of the branch's own spike writeups already say
+their sources are safe to delete once the writeup exists, and it does); the redundant mime
+fix was left as-is, since `main`'s version was already tested and confirmed; the unrelated,
+still-relevant restart fix was extracted and landed on `main` on its own, renumbered
+BUG-008 to avoid colliding with numbers `main` had already assigned elsewhere in the
+meantime. The TLS feature itself stays on its branch, untouched, its own commit message
+lists real open reliability gaps that make it not yet ready regardless.
+
+**(2026-08-23) An AHK-triggered daemon restart was silently dropping the next clip as an
+unsynced baseline, unfixed on `main` until brought over from the branch above.** *Symptom:*
+phone/tablet -> laptop sync occasionally "just doesn't work" right after a restart, no
+error anywhere. *Root cause:* `core/hub.py`'s baseline-adoption tracking was purely
+in-memory, so any fresh process, including a spurious restart of an already-healthy daemon,
+had no way to tell "first ever connection" apart from "just restarted, and the device's
+clip genuinely changed while it was down" and silently treated both the same way: adopt,
+don't apply. Originally measured across three real daemon restarts in one boot
+(2026-08-14). Independently reproduced during this session's own restarts while deploying
+the BUG-007 fix above (`baseline from phone (37064 chars), not applied`), harmless that
+time only because the dropped content happened to be an echo of what the laptop had itself
+just written. *Fix:* a small durable `core/baseline_store.py` (mirrors `core/outbox.py`'s
+atomic-write pattern) persists the last-seen hash per device across process restarts, so a
+genuine content change during downtime is applied instead of dropped; a companion AHK-side
+guard (outside this repo, confirmed already present) skips the restart entirely when a
+single healthy instance is already running. Full writeup:
+`bugs/BUG-008-restart-drops-baseline.md`.
+
 ---
 
 ## 9. Security & trust model
@@ -637,6 +671,38 @@ sidecar). The pre-implementation device spike and its findings are in
 spike remain genuinely unverified in real use (reading a clip URI minted by a different
 app's provider; live visual paste confirmation across arbitrary third-party apps) — flip it
 once confirmed, matching this project's convention for BUG-001 through BUG-003.
+
+### Same-WiFi TLS fallback for when Tailscale itself is down
+
+Built and proven correct on real hardware, not merged: lives entirely on the
+`feature/lan-fallback-tls` branch (commits `1ebb7a6`/`f15ea36`, 2026-08-18), not on `main`.
+
+Motivated by a real incident: phone -> laptop sync stopped for hours at a time, traced to
+Android's Doze mode silently killing the phone's Tailscale connection during idle, not
+anything on the Windows side (a well-reasoned alternate hypothesis, the clipboard listener
+going stale after sleep, was spiked and disproved first; see
+[bugs/SPIKE-WINDOWS-CLIPBOARD-LISTENER.md](bugs/SPIKE-WINDOWS-CLIPBOARD-LISTENER.md) on that
+branch). `transports/framing.py`'s existing HMAC-SHA256 scheme is authorization/anti-replay
+only and assumes Tailscale's WireGuard tunnel supplies confidentiality; a same-WiFi fallback
+has no such tunnel, so the branch wraps the Tier 2 (Termux) socket in TLS 1.2+ (stdlib `ssl`,
+cert-pinned, no new dependency) on top of the unchanged HMAC layer, with `TcpTransport` trying
+a device's normal address first, then an optional `lan_host`, and treating a handshake/cert
+failure as a hard error rather than a silent plaintext fallback. Confirmed end-to-end on real
+devices, both directions, both network states, with three real `rish`-invocation bugs found
+and fixed along the way; see
+[bugs/SPIKE-LAN-TLS-FALLBACK.md](bugs/SPIKE-LAN-TLS-FALLBACK.md) on that branch for the full
+measured record.
+
+**Why it's not on `main` yet, by its own commit message:** intermittent `READY` timeouts not
+yet root-caused, Termux itself can get killed in the background (no Termux:API installed on
+the test phone), and images/tablet/a live packet capture/unauthorized-device rejection were
+never exercised over this path. Off by default even on its own branch
+(`config.json` keeps both devices on `"transport": "adb"`); opt-in per device once the gaps
+above are addressed. That branch's own unrelated daemon-restart-baseline-drop fix was
+extracted and landed on `main` separately as [BUG-008](bugs/BUG-008-restart-drops-baseline.md);
+its link-copy mime fix was superseded by the equivalent, already-shipped fix in
+[BUG-007](bugs/BUG-007-long-link-copy-rejected-as-non-text.md), both discovered when this
+branch turned up during a 2026-08-23 documentation pass.
 
 ### Files, via Taildrop handoff
 
