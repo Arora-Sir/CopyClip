@@ -13,7 +13,7 @@ in real use, not merely when a test passes.
 | [BUG-003](BUG-003-duplicate-daemon-instances.md) | Two daemons run at once: every laptop copy lands on the phone twice, and log lines go missing | High | **OPEN, fix applied, awaiting confirmation** |
 | [BUG-004](BUG-004-com-thread-init.md) | `CoCreateInstance` fails with `CO_E_NOTINITIALIZED` on some threads, silently dropping an incoming image | High (data loss) | **OPEN, fix applied, awaiting confirmation** |
 | [BUG-005](BUG-005-duplicate-screenshot-push.md) | A screenshot re-touched in place by a background process (media scanner, thumbnail regen, ...) gets re-pushed as if it were new | Medium-High | **OPEN, fix applied, awaiting confirmation** |
-| [BUG-006](BUG-006-screenshot-clipboard-preview-duplicate.md) | A companion app's clipboard accessibility service places a small preview image on the real Android clipboard at screenshot time, synced as a spurious duplicate of the real capture | Low-Medium | **OPEN, fix applied, awaiting confirmation** |
+| [BUG-006](BUG-006-screenshot-clipboard-preview-duplicate.md) | A companion app's clipboard accessibility service places a small preview image on the real Android clipboard at screenshot time, synced as a spurious duplicate of the real capture | Low-Medium | **CONFIRMED, fixed as of 2026-08-23 (reopen if it recurs)** |
 | [BUG-007](BUG-007-long-link-copy-rejected-as-non-text.md) | Copying a link (vs. plain-selected text) on the phone reports a non-standard mime (`text/x-moz-url`) the laptop doesn't recognize, so the clip is silently rejected as "non-text" and never syncs | Medium-High | **CONFIRMED, fixed in real use (2026-08-23)** |
 
 ## Companion files
