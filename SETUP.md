@@ -217,8 +217,13 @@ doing once per device, not once per setup.
 doesn't exist yet on it), and it'll need `adb -d tcpip 5555` re-armed over USB after every
 cold start instead. **Use this section anyway, don't skip to §3**, confirmed 2026-09-01 on
 exactly this kind of device: everything else here works identically, the manual re-arm is
-the only real difference. A tiny double-click `.bat` wrapping `adb -d tcpip 5555` then
-`adb connect <ip>:5555` makes that one step painless, keep it wherever you keep this
+the only real difference. Plan for needing it every time; a clean reboot test the same day
+saw wireless adb come back on its own with no re-arm run by anyone, cause still not
+identified (a MacroDroid task was suspected and ruled out directly with the device's owner,
+see ARCHITECTURE.md §8 for what's still an open candidate), so treat that as a possible
+bonus, not something to rely on.
+A tiny double-click `.bat` wrapping `adb -d tcpip 5555` then `adb connect <ip>:5555` makes
+that one step painless on the times it is needed, keep it wherever you keep this
 device's other tools, it doesn't need to live in this repo.
 
 ### 2.3 Add it to config.json (§1.3) and verify

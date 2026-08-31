@@ -663,6 +663,41 @@ each specific device it's being applied to, not assumed to generalize from the o
 that actually needed it, and a working system, before extending it further, is a better
 moment to ask "does this scale down to less than what's already built" than after.
 
+**(2026-09-01) A real, clean cold-boot test of `pixel` confirmed `BootReceiver` genuinely
+works with zero manual action, and surfaced a real, unexplained anomaly worth tracking.**
+*Test:* the device was rebooted and deliberately left untouched (unlocked only, no app
+opened), specifically to get an uncontaminated read after an earlier attempt got muddied by
+manual app-opening. *Confirmed, not inferred:* `adb logcat` showed Android's own
+`ActivityManager` starting `com.mohitarora.copyclip` specifically `for broadcast
+{.../.service.BootReceiver}`, unprompted, the service came up correctly, bound Shizuku,
+attempted the bridge, and correctly refused on root, exactly as designed, all without
+opening the app. Timing has real variance though, a `ps -A` check at 111s uptime found
+nothing running yet; the same check at 166s found it alive, logs place its actual start
+somewhere in that window, matching the same rough delay range the (contaminated) first
+reboot test also suggested.
+
+**A genuine, unexplained anomaly: wireless adb's TCP listener came back up on this boot
+with no `adb -d tcpip 5555` run by anyone.** This directly contradicts what this file and
+`config.json`'s `_pixel` note have said all session (no persistent pairing survives reboot
+on this device, Android 11+ only). `getprop service.adb.tcp.port` read `5555` unprompted;
+`adb logcat` showed Android's own `AdbDebuggingManager` processing a remembered, already-
+authorized key from the laptop (`state = 4, alwaysAllow = true`) starting at boot+27s,
+**before** Shizuku's own boot receiver fired at boot+35s, so Shizuku restarting itself is
+not obviously the cause. **MacroDroid ruled out, confirmed directly with the user**: no
+macro was ever set up for this, and the app isn't even installed on `pixel` (it's present
+on phone/tab, which is likely what made it a plausible guess in the first place, but that
+doesn't carry over to this device). Remaining candidates, still none confirmed: Shizuku's
+root-mode server doing this anyway despite the timing (its *process* started later, but
+something it left behind from a prior run is not ruled out); a Magisk boot script or module
+(the device is rooted via Magisk; this would need root-shell inspection of
+`/data/adb/service.d/` or similar to check, not yet done, and not attempted casually given
+this project's own no-root rule, even for pure inspection); something else entirely. USB
+was physically connected during this test (left from earlier work), which cannot be ruled
+out as a factor without a repeat test with it genuinely unplugged. **Do not treat this as
+"pixel no longer needs the manual re-arm"** until the mechanism is identified and
+reproduced deliberately, not just observed once, this note
+exists so the observation isn't lost, not to claim the limitation is gone.
+
 **(2026-09-01) `pixel` moved from the app/Send-Clip-only tier to plain Tier 1 adb, the same
 day it was asked "does opening Sefirah count as the automatic bridge being done."**
 *Symptom:* none, this was caught by a direct question, not a failure. *What actually
