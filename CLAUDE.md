@@ -7,8 +7,12 @@ what you're doing here.
 
 ## What this project is
 
-One clipboard across a Windows laptop and two Samsung devices, no installed app, no cloud.
-Read [ARCHITECTURE.md](ARCHITECTURE.md) before touching anything non-trivial — it explains
+One clipboard across a Windows laptop, two Samsung devices, and a Pixel, no cloud. None of
+the three phones/tablets need an installed app for actual sync (plain `adb`, shell UID,
+zero shared key); the Pixel has one anyway, purely for its manual "Send Clip" fallback, see
+`config.json`'s `_pixel` note for why it's the one device with a real quirk (a manual
+re-arm after a reboot).
+Read [ARCHITECTURE.md](ARCHITECTURE.md) before touching anything non-trivial, it explains
 *why* the code is shaped the way it is, not just what it does, and changing something
 without reading the relevant section is how a proven mechanism quietly breaks.
 
@@ -22,7 +26,7 @@ without reading the relevant section is how a proven mechanism quietly breaks.
   raw `ctypes`, not `pywin32`. `ClipBridge.java` resolves everything reflectively against
   the stock Android SDK jar, never a patched hidden-API jar. If a task seems to need a
   library, look for the platform-native way first.
-- **Never run as root** on either Android device (`android/ClipBridge.java` runs as the
+- **Never run as root** on any Android device (`android/ClipBridge.java` runs as the
   shell UID via `app_process`; scrcpy issue #1095 is the documented cautionary tale in
   `otherCopyProjects/NOTES.md`). Never suggest it as a fix for anything.
 - **Measure before concluding, and say when something is inferred rather than proven.**
@@ -53,8 +57,10 @@ without reading the relevant section is how a proven mechanism quietly breaks.
 
 - `core/` — routing, dedup, outbox, policy. Content-agnostic; operates on bytes + MIME.
 - `nodes/` — per-device I/O (`windows_node.py`/`winclip.py`/`winimage.py` for the laptop,
-  `android_node.py` for the phone/tablet's wire protocol).
-- `domains/` — Samsung Continuity awareness (representative election, health).
+  `android_node.py` for any Android device's wire protocol, generic across phone/tab/pixel).
+- `domains/` — Samsung Continuity awareness (representative election, health) for devices
+  that mirror each other outside CopyClip; a standalone device like `pixel` skips this
+  entirely and is written to directly, same as the laptop.
 - `android/ClipBridge.java` — the on-device helper, rebuilt with `android/build_dex.ps1`.
 - `bugs/` — dated incident writeups and device spikes, all with measured evidence.
 - `tests/` — `test_core.py`/`test_android_node.py`/`test_imaging.py` are pure logic, no

@@ -237,9 +237,14 @@ public final class ClipBridge {
     private static int inboundNChunks;
     private static final List<String> inboundChunks = new ArrayList<>();
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws java.io.UnsupportedEncodingException {
+        // PrintStream(OutputStream, boolean, Charset) is Java 10+ only -- NoSuchMethodError
+        // on Android 10 (SDK 29)'s core-oj.jar, measured on a real Pixel (sailfish). The
+        // String-encoding-name overload below has existed since Android API 1 and behaves
+        // identically; "UTF-8" can never actually trigger this checked exception, every
+        // JVM/ART implementation is required to support it.
         out = new PrintStream(new java.io.FileOutputStream(java.io.FileDescriptor.out), true,
-                StandardCharsets.UTF_8);
+                "UTF-8");
         try {
             clipboard = connectClipboard();
         } catch (Throwable t) {

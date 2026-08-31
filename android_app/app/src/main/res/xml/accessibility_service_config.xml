@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Deliberately the narrowest config that still qualifies as an "active accessibility
+     service" for Android's background-clipboard exemption, see
+     bugs/SPIKE-PIXEL-ACCESSIBILITY.md for whether this narrow a config is actually enough,
+     or whether a broader accessibilityEventTypes/canRetrieveWindowContent is required. Not
+     assumed correct just because it compiles. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="100"
+    android:canRetrieveWindowContent="true"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows"
+    android:description="@string/accessibility_service_description" />

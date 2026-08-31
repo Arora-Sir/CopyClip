@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">CopyClip</string>
+    <string name="accessibility_service_description">Lets CopyClip read and write the
+        clipboard while in the background, on devices where Shizuku cannot stay active
+        without root. This does not use screen-reading features of accessibility; it exists
+        only because an active accessibility service is one of the two ways Android permits
+        background clipboard access. Off by default, opt-in only.</string>
+</resources>

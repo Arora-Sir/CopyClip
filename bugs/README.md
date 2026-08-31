@@ -16,6 +16,7 @@ in real use, not merely when a test passes.
 | [BUG-006](BUG-006-screenshot-clipboard-preview-duplicate.md) | A companion app's clipboard accessibility service places a small preview image on the real Android clipboard at screenshot time, synced as a spurious duplicate of the real capture | Low-Medium | **CONFIRMED, fixed as of 2026-08-23 (reopen if it recurs)** |
 | [BUG-007](BUG-007-long-link-copy-rejected-as-non-text.md) | Copying a link (vs. plain-selected text) on the phone reports a non-standard mime (`text/x-moz-url`) the laptop doesn't recognize, so the clip is silently rejected as "non-text" and never syncs | Medium-High | **CONFIRMED, fixed in real use (2026-08-23)** |
 | [BUG-008](BUG-008-restart-drops-baseline.md) | An AHK-triggered daemon restart silently drops the next phone/tablet clip as an unsynced "baseline" | High | **CONFIRMED, fixed in real use (2026-08-23)** |
+| [BUG-009](BUG-009-pixel-clipbridge-printstream-crash.md) | ClipBridge crashes instantly on Android 10 (Pixel) -- a `PrintStream` constructor added in Java 10 doesn't exist on this SDK's core library. Writes into pixel confirmed fixed; a second, separate bug found where pixel stops announcing its own clipboard changes after one write lands on it | High | **Crash fix CONFIRMED (2026-08-31). Read-direction freeze: retested clean 2026-09-01 (exact write-then-local-copy sequence, no freeze), downgraded to not currently reproducing, watching real use, not closed** |
 
 ## Companion files
 
@@ -27,6 +28,23 @@ in real use, not merely when a test passes.
   `app_process` as shell UID, with two real bugs found and fixed in the ported scrcpy code.
   Two sub-questions (visual paste confirmation, reading a third-party app's clip URI) are
   **OPEN, awaiting confirmation in real use**, same convention as the bugs below.
+- **[SPIKE-PIXEL-ACCESSIBILITY.md](SPIKE-PIXEL-ACCESSIBILITY.md)** — tested whether an enabled
+  `AccessibilityService` unlocks background clipboard reads on the pixel's Android 10, the
+  premise the planned pixel fallback tier depended on. **Measured false**: Android's own
+  `ClipboardService` log shows a strict focus-or-system-service check with no accessibility
+  exemption, denying CopyClip and three unrelated apps (including a Google system app)
+  identically. Plausibly explains, via the same root cause, why Sefirah's own pixel -> laptop
+  direction has never worked either. **Blocks item E of the app-rewrite plan as designed.**
+- **[SPIKE-ANDROID-USERSERVICE.md](SPIKE-ANDROID-USERSERVICE.md)**, the mechanism itself:
+  a real Android app (`android_app/`) can run ClipBridge via a Shizuku `UserService` that
+  spawns the same unmodified `clipbridge.dex` and speaks the existing TCP protocol, instead
+  of `adb shell app_process`. Confirmed live, automatic, both directions, on phone and tab.
+  **Since walked back off phone and tab the same day** (see ARCHITECTURE.md §8, "The
+  installed app was walked back off phone/tab"): the reboot-survival concern that motivated
+  it there turned out to already be solved by plain `adb`, so the mechanism this spike
+  proved is now used only where it's actually needed, `pixel`, whose Shizuku only ever
+  grants root there (see BUG below), the app-rewrite plan's phone/tab automation goal is
+  superseded, not open.
 
 ## Conventions
 

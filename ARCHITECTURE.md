@@ -31,6 +31,13 @@ already mirror each other on their own, through Samsung's built-in "Continuity" 
 treats "the phone and the tablet" as one Samsung pocket, writes to whichever one is
 reachable, and lets Samsung carry it to the other for free.
 
+**A fourth device, `pixel` (a 2016 Google Pixel), is supported but disabled by default**
+(`config.json`'s `"enabled": false`) — standalone, no Samsung Continuity partner, would
+behave exactly like the laptop if turned on. Off because it's used only 1-2 days a month and
+has no non-root way to keep wireless adb alive across its own reboots (Android's persistent
+Wireless Debugging pairing doesn't exist before Android 11; this device's final OS version is
+Android 10) — see `config.json`'s `_pixel` note and [BUG-009](bugs/BUG-009-pixel-clipbridge-printstream-crash.md).
+
 ---
 
 ## 2. The problem this solves, and why it's harder than it sounds
@@ -48,7 +55,52 @@ uses for its own clipboard sync feature. So CopyClip pushes a small compiled Jav
 (`ClipBridge.dex`, built from [android/ClipBridge.java](android/ClipBridge.java)) to each
 device and runs it via `adb shell app_process ... ClipBridge serve` — which executes *as*
 the shell UID, without installing anything as a normal app. This is why there's "no app on
-either Samsung device."
+either Samsung device" — was true when this section was written.
+
+**Update (2026-08-31):** an installed app (`android_app/`, package
+`com.mohitarora.copyclip`) was built this session, and briefly ran on phone and tab too
+(hosting this same `clipbridge.dex` from a Shizuku `UserService` instead of an `adb` shell
+session, same shell-UID mechanism underneath, same dex, same protocol, just started by
+Shizuku's own privileged API). It was reverted off phone/tab the same day: the reboot-
+survival concern that motivated it turned out to already be solved by plain `adb` once
+Wireless Debugging has been paired with the network once (confirmed by a real phone reboot,
+see the Troubleshooting entry in README), so the app added a shared key, a port, and a
+foreground service for zero actual capability gain on those two devices. Both are back to
+`"transport": "adb"` in `config.json`, and the app is uninstalled from both, see the "App
+walked back off phone/tab" entry in §8 for the full reasoning. The laptop side's own change
+stays regardless of any of this: `windows_app/tray.py` replaces running `copyclip.py` as a
+bare script, a `Shell_NotifyIconW` tray icon plus an optional tkinter dashboard wrapped
+around the exact same `core/hub.py` daemon, `build_hub()` unchanged (see §4), and it applies
+equally whether a given device is on plain adb or the app tier.
+
+**Update (2026-09-01):** `pixel` is now `"enabled": true` on plain `"transport": "adb"` in
+`config.json`, the exact same zero-app Tier 1 phone/tab use, confirmed live both directions.
+Its Android version predates persistent Wireless Debugging pairing (Android 11+), so unlike
+phone/tab it cannot get reboot survival from this alone, a real platform wall, not a config
+choice, so it needs `adb -d tcpip 5555` re-armed over USB after every cold start (this
+machine has a double-click convenience script for that at
+`<software>\Phone\Pixel\rearm_wireless_adb.bat`, personal tooling, not part of this repo).
+Until re-armed, this device's entry just sits unreachable and the daemon retries with its
+normal backoff, harmless, same as any other device being briefly offline. This also
+resolved a real, previously-unexplained symptom: an S24-to-pixel copy going through the
+laptop as an intermediate hop (S24 to laptop over CopyClip's own reliable path, then laptop
+to pixel, now also CopyClip's own reliable path instead of depending on a separate tool for
+that second leg) no longer depends on anything outside this codebase for that specific
+content, see §8's "pixel moved to Tier 1" entry for the full story.
+
+The installed app (`android_app/`) stays installed on `pixel` regardless, now purely for
+"Send Clip" (§6.8, now also image-capable) as the fallback for a moment it hasn't been
+re-armed yet. Its automatic background bridge still **refuses to start**, and always will
+on this specific device: its Shizuku only ever grants root (UID 0), never shell UID, and
+`ClipBridgeService.kt`'s `requireShellUid()` guard checks the *actual* UID Shizuku handed
+it rather than trusting that a successful `bindUserService()` call implies shell, confirmed
+live: `ps -A` showed `root ... com.mohitarora.copyclip:service` after nothing but a normal
+in-app "Grant Shizuku access", no explicit root request anywhere in this codebase. This
+project's no-root rule has no carve-out for "Shizuku said it was fine": that specific tier
+stays genuinely off on this device, permanently, unrelated to the Tier 1 path above. A
+separate tool (Sefirah), if still installed, can also relay laptop-to-pixel independently
+of any of this, though it's now redundant with Tier 1 for that specific direction. Full
+setup for every path: [SETUP.md](SETUP.md).
 
 **A second, non-obvious discovery: a locked phone silently discards clipboard writes.**
 Not screen-off — the actual keyguard lock. With the phone locked, `setPrimaryClip` returns
@@ -137,8 +189,11 @@ being falsely marked "delivered" and later either lost or delivered stale.
 | [nodes/android_node.py](nodes/android_node.py) | A phone or tablet as a node. Owns its own connect/reconnect supervisor and speaks the ClipBridge wire protocol (§5). |
 | [domains/sync_domain.py](domains/sync_domain.py) | `SyncDomain` — the phone+tablet grouping. Elects a representative, tracks whether Samsung Continuity is actually propagating (healthy vs degraded), and decides who gets written to for one clip. |
 | [transports/adb_transport.py](transports/adb_transport.py) | Tier 1: a persistent `adb shell` pipe. Works with zero phone-side setup; doesn't survive a phone reboot (wireless ADB isn't `persist`ed). |
-| [transports/tcp_transport.py](transports/tcp_transport.py) | Tier 2: Termux + Shizuku (`rish`), for when reboot survival matters. |
-| [android/ClipBridge.java](android/ClipBridge.java) | The on-device helper. Source is tracked; the compiled `.dex` is gitignored and rebuilt with `android/build_dex.ps1`. |
+| [transports/tcp_transport.py](transports/tcp_transport.py) | Tier 2: TCP to the installed app's Shizuku-hosted bridge (or Termux, same protocol either way), for when reboot survival matters. The hub is always the client here, it dials out, never listens. |
+| [transports/push_listener.py](transports/push_listener.py) | The one direction that runs backwards: an inbound listener a device dials *into*, for the manual "Send Clip" fallback (§6.8), same mutual-HMAC handshake as the tcp tier, played from the opposite role. |
+| [android/ClipBridge.java](android/ClipBridge.java) | The on-device helper. Source is tracked; the compiled `.dex` is gitignored and rebuilt with `android/build_dex.ps1`. Unchanged by the installed-app work above, it's still the exact same dex, just launched differently. |
+| [android_app/](android_app/) | The installed Android app (package `com.mohitarora.copyclip`). `SyncForegroundService.kt` owns the Shizuku binding and republishes state to the UI; `shizuku/ClipBridgeService.kt` is the UserService that spawns `ClipBridge.dex` and enforces the shell-UID guard; `SendClipActivity.kt`/`shizuku/PushClient.kt` are the manual-fallback push path (§6.8). |
+| [windows_app/tray.py](windows_app/tray.py) | The laptop side's tray icon + autostart registration, wrapping `copyclip.py`'s own `build_hub()`/`load_config()` unchanged, the daemon itself did not change. `windows_app/dashboard.py` is the optional tkinter status window. |
 
 ---
 
@@ -382,6 +437,52 @@ you toggle Tailscale back on, you may wait anywhere up to the current backoff in
 however long Tailscale itself takes to re-establish its tunnel — commonly under a minute,
 sometimes a bit over. This is a real, known, and currently accepted tradeoff, not a bug.
 
+### 6.8 Send Clip: the manual fallback tier
+
+For a device whose automatic background bridge can't run at all (root-mode Shizuku,
+pre-Android-11 with no Wireless Debugging pairing, or any future case, §2's pixel update is
+the concrete example), CopyClip needs a path that doesn't depend on that bridge in any way.
+The one clipboard-read permission Android grants with **zero** special setup is being the
+genuinely focused foreground app, the same exemption `bugs/SPIKE-PIXEL-ACCESSIBILITY.md`
+measured is real, just narrower than hoped. "Send Clip" is built entirely on that exemption
+and nothing else:
+
+- `SendClipActivity.kt` is a real (if minimal) visible screen, not a Shizuku call. It waits
+  for `onWindowFocusChanged(true)`, the documented, reliable signal that this app is now
+  the actual focused window, before touching `ClipboardManager.getPrimaryClip()`, which
+  needs no permission at all once that's true.
+- Once read, the content is pushed to the laptop over a **new, backwards** connection: this
+  device dials *out* to the hub instead of the hub dialing in, the one direction nothing
+  else in this codebase does (every other tier has the hub as the client). `PushClient.kt`
+  plays the client role of the exact same mutual-HMAC handshake `transports/framing.py`
+  already defines; `transports/push_listener.py` plays the server role on the hub, something
+  that has never existed before this, the laptop had never needed to *accept* a connection
+  for CopyClip until this feature.
+- The pushed frame lands in `hub.on_clip()` exactly like any other device's clip, same
+  dedup, same domain-awareness (a Samsung-domain device never gets double-written), same
+  policy checks. No new routing logic exists for this path; it reuses the same one entry
+  point every other source already goes through.
+- **A genuinely new operational requirement:** since the laptop has never accepted an
+  inbound connection for CopyClip before, Windows Firewall blocks the new push port
+  (`push_port`, default 8387) by default, silently, as a connection timeout on the device
+  side rather than a clear rejection. One-time fix, documented in
+  [SETUP.md](SETUP.md#35-firewall-rule-for-send-clip).
+
+**Images (2026-09-01):** `SendClipActivity.kt` checks `ClipDescription.getMimeType(0)`
+first; for a recognized image mime (matching `core/models.py`'s `IMAGE_MIMES` exactly:
+PNG/JPEG/GIF/BMP/WEBP) it reads the actual bytes via `ContentResolver.openInputStream()`
+on the clip item's URI, instead of the text-coercion path. Deliberately sent as **one
+unchunked frame**, not the `SETB`/`SETC` chunking the main sync path uses for large
+transfers (§6.7a): a screenshot is a few MB, comfortably under the 24 MiB cap, and adding
+chunking here would be real complexity this feature doesn't need to carry. `PushClient.kt`
+and `transports/push_listener.py` both widened their socket timeout from 8s/10s to 20s/20s
+to give a slower link enough room for that one larger frame. Confirmed end to end with a
+real device screenshot: pushed through the actual wire protocol, landed on the laptop
+clipboard, and verified byte-for-byte identical to the source file by SHA-256, including
+triggering the laptop's own screenshot-backup feature automatically (proof it was recognized
+as a genuine image, not text). An unrecognized image format (HEIC, etc.) is reported as a
+plain failure rather than silently transcoded, out of scope for a manual one-shot push.
+
 ---
 
 ## 7. Tuning knobs
@@ -534,6 +635,91 @@ still-relevant restart fix was extracted and landed on `main` on its own, renumb
 BUG-008 to avoid colliding with numbers `main` had already assigned elsewhere in the
 meantime. The TLS feature itself stays on its branch, untouched, its own commit message
 lists real open reliability gaps that make it not yet ready regardless.
+
+**(2026-08-31) The installed app was walked back off phone/tab the same day it was
+extended to them, over-engineering caught by the user asking a direct question, not by any
+measurement of mine.** *Symptom:* none, functionally, phone and tab synced correctly on the
+app/Shizuku tier the whole time. *What actually happened:* asked directly whether the app
+was even necessary given "Tailscale was already working perfectly" before it, versus reverting
+to the plain-adb method with no shared key, port, or hub address. *Investigated because that
+question deserved a real answer, not a defense of already-built work:* the reboot-survival
+concern that had originally motivated moving phone/tab onto the Shizuku-hosted tier was
+checked against this session's own already-recorded evidence, and it didn't hold up. The
+Troubleshooting entry in README, itself written and confirmed earlier the same day, already
+established that plain `adb` survives a real reboot once Wireless Debugging has been paired
+with the network once. That was true for phone/tab specifically before any of the app work
+started. *Root cause:* the app/Shizuku tier was extended to phone/tab based on a reboot-
+survival justification that a fact already sitting in this same file's own session history
+would have ruled out, if it had been checked against phone/tab specifically rather than
+applied uniformly across all devices including the one (pixel) it was actually necessary
+for. *Fix:* `config.json` reverted phone and tab to `"transport": "adb"`; the app was
+uninstalled from both (`adb uninstall com.mohitarora.copyclip`); both directions verified
+live afterward (raw `ClipBridge get`/`set` round trip, real content, real device). Pixel is
+unaffected, it stays on the app tier because it's the one device that genuinely fails the
+plain-adb reboot-survival check (Android 10, predates the OS feature that provides it).
+*Generalizable lesson:* "this device is having a problem" is not evidence for "every device
+should get the same fix." A justification for added complexity needs to be checked against
+each specific device it's being applied to, not assumed to generalize from the one device
+that actually needed it, and a working system, before extending it further, is a better
+moment to ask "does this scale down to less than what's already built" than after.
+
+**(2026-09-01) `pixel` moved from the app/Send-Clip-only tier to plain Tier 1 adb, the same
+day it was asked "does opening Sefirah count as the automatic bridge being done."**
+*Symptom:* none, this was caught by a direct question, not a failure. *What actually
+happened:* the user asked whether Sefirah relaying laptop-to-pixel meant "automatic bridge
+is already done," which surfaced a real architectural gap: pixel had never been tried on
+plain adb Tier 1 at all this session, only on the Shizuku-hosted tier (which is root-refused
+there) and Send Clip (manual, outgoing-only). *Root cause:* Tier 1 needs nothing pixel
+doesn't already have, no root, no Shizuku, just shell-UID adb access, the same mechanism
+phone/tab already prove reliable, its only real cost is the manual re-arm this device
+already needs after every reboot regardless of which tier is used, since that limitation is
+Android-version-specific (no persistent Wireless Debugging pairing before Android 11), not
+tier-specific. *Fix:* `config.json`'s pixel entry flipped to `"transport": "adb", "enabled":
+true`; verified live both directions after a cold-connection retry settled (`laptop ->
+pixel` and `pixel -> laptop`, exact content, confirmed by direct base64 decode, not log
+inference alone). *Side effect, also real:* this incidentally explained and fixed a
+previously-unexplained intermittent symptom (S24-to-pixel copies sometimes not arriving):
+that path was always S24-to-laptop (CopyClip, reliable) then laptop-to-pixel (Sefirah, a
+third-party app with no logs or guarantees available to this codebase), and the second hop
+is now also CopyClip's own ACK-confirmed, retry-queued path instead. *Generalizable lesson,
+same shape as the previous day's:* a device's constraint (pixel needs Shizuku, therefore
+root-refused, therefore needs a fallback) had been treated as ruling out its most basic tier
+too, without that being separately checked. The manual-rearm cost of Tier 1 was already
+being paid for other reasons (this session also produced a re-arm convenience script,
+`<software>\Phone\Pixel\rearm_wireless_adb.bat`, personal tooling outside this repo); it
+just hadn't been connected to "therefore Tier 1 works here too."
+
+**(2026-08-31) `Theme.NoDisplay` does not qualify for Android's clipboard-focus exemption,
+even though the Activity genuinely starts.** *Symptom:* `SendClipActivity`, first built as
+an invisible `Theme.NoDisplay` trampoline meant to read the clipboard and finish
+immediately, always read an empty clipboard. *Investigated because:* this project's own
+measure-before-concluding rule, rather than trusting that "the Activity started" was
+equivalent to "the Activity is focused." *Measured:* `adb logcat` around a real tap showed
+`ActivityTaskManager: START ... SendClipActivity` followed immediately by `ClipboardService:
+Denying clipboard access to com.mohitarora.copyclip, application is not in focus neither is
+a system service`, the exact restriction message from `bugs/SPIKE-PIXEL-ACCESSIBILITY.md`,
+on an Activity that had, by every other measure, just started as the topmost task. *Root
+cause:* `Theme.NoDisplay` is defined to never actually create/show a window (that's its
+entire purpose), and window focus, not merely being the started/topmost activity, is what
+the platform's clipboard check apparently keys on. *Fix:* `SendClipActivity` now shows real
+(if minimal) visible content and gates the clipboard read on `onWindowFocusChanged(true)`,
+confirmed working end-to-end on a real device afterward (§6.8). *Generalizable lesson:* an
+Activity being "started" and an Activity being "focused" are not the same fact on this
+platform, and only the second one is what several of Android's background-access exemptions
+actually check.
+
+**(2026-08-31) A newly-installed system-wide JDK broke Android builds with no code
+change.** *Symptom:* `gradlew.bat assembleDebug` failed immediately with
+`IllegalArgumentException: 25.0.2` out of the Kotlin compiler, on a build that had worked
+earlier the same session. *Root cause:* a JDK 25 install had been added to this machine
+since, with nothing pinning `JAVA_HOME`, so it shadowed `java` on `PATH` ahead of the JDK
+this toolchain actually expects; this project's Kotlin compiler version cannot parse a JDK
+25 version string at all. *Fix:* `android_app/gradle.properties` now pins
+`org.gradle.java.home` to Android Studio's own bundled JDK (21), project-local only, does
+not touch the system `JAVA_HOME`. *Why this matters beyond one machine:* any future JDK
+install on this or another dev machine can silently break the build the same way; if
+`gradlew.bat` ever fails with a bare version-number "what went wrong" message, check
+`java -version` against what's pinned in `gradle.properties` before assuming a code problem.
 
 **(2026-08-23) An AHK-triggered daemon restart was silently dropping the next clip as an
 unsynced baseline, unfixed on `main` until brought over from the branch above.** *Symptom:*
@@ -722,6 +908,34 @@ No design work needed — already fully supported by the current architecture. A
 to `config.json`'s `devices[]` (and to a `domains[]` group if it should mirror an existing
 device via Samsung Continuity, standalone otherwise). `core/hub.py` does not change either
 way — this is exactly what the hub/node abstraction in §4 was built to make trivial.
+
+**Confirmed for real (2026-08-31):** `pixel`, a Google Pixel phone, was added as a fourth
+device with a single `config.json` entry and zero code changes anywhere (`core/hub.py`,
+`domains/sync_domain.py`, `android/ClipBridge.java` all untouched). It is standalone, not a
+`domains[]` member, since a Pixel has no Samsung Continuity relationship with the phone/tab
+pair — `core/hub.py`'s existing `_standalone_nodes()` (already exercised daily for the
+laptop) picked it up with no new logic. `android/ClipBridge.java` needed no changes either:
+grepping it for Samsung-specific identifiers (`samsung`, `sec.android`, `com.samsung`)
+returns nothing — it only ever talks to AOSP's `IClipboard` binder via version-adaptive
+reflection (already branching on `SDK_INT`), so a stock-Android device is, if anything, a
+more direct fit than the Samsung devices it was proven on first. The one real prerequisite
+is device-side, not code-side: wireless adb must be armed once with the device on USB
+(`adb -d tcpip 5555`, same as README's existing per-device Troubleshooting step), since
+`persist.adb.tcp.port` does not survive a reboot on any of these devices.
+
+**Follow-up, same day:** a real, separate crash was then found and fixed on this device --
+[BUG-009](bugs/BUG-009-pixel-clipbridge-printstream-crash.md), a `PrintStream` constructor
+missing from Android 10's core library, invisible on `phone`/`tab` since they run much newer
+Android. Once fixed, `pixel` connected and read cleanly, but a second, unresolved question
+(a write-path timeout, never conclusively explained) surfaced before it could be fully
+exercised. Separately, `pixel` turned out to have no non-root path to the kind of persistent
+wireless-adb pairing `phone`/`tab` already have (Android's Wireless Debugging pairing doesn't
+exist before Android 11; this device is permanently on Android 10) -- combined with genuinely
+infrequent use (1-2 days a month), that made the manual USB re-arm needed after every cold
+start not worth it, so `pixel` is `"enabled": false` in `config.json` today, with Sefirah
+(already installed on it) covering its clipboard sync instead. The fix and the standalone
+support both stay in the codebase regardless -- flipping it back on is still just the one
+config line this section always promised.
 
 ---
 

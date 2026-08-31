@@ -1,9 +1,14 @@
 """Tier 2 transport: TCP to a Termux-hosted node on the phone, over Tailscale.
 
-Exists because wireless ADB does not survive a phone reboot on this device
-(`service.adb.tcp.port` is set, `persist.adb.tcp.port` is not, and making it persistent
-needs root). Shizuku does survive reboots, so this tier reaches ClipBridge through `rish`
-instead of `adb`.
+Originally motivated by wireless ADB not surviving a phone reboot -- that turned out to be
+incomplete. Once Shizuku (or plain Android Wireless Debugging) is paired once with a
+remembered network, that pairing survives reboot and reopens the wireless adb listener on
+its own, which Tier 1's plain `adb` also benefits from for free -- see adb_transport.py,
+confirmed 2026-08-31 by a real device reboot with no cable involved. So reboot survival
+alone is not a reason to prefer this tier once a device has been paired at least once. What
+this tier actually still offers on top: a connection that depends on neither the `adb`
+binary nor an authorized adb key, and its own HMAC-SHA256 authentication (see framing.py),
+since this is a real socket other tailnet devices could otherwise reach.
 
 Same dex, same ClipBridge protocol as Tier 1. Only the pipe differs, plus HMAC framing
 because this one is a real socket other tailnet devices could reach.

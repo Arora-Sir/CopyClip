@@ -63,6 +63,7 @@ DEFAULT_CONFIG = {
     "screenshot_backup_include_devices": True,
     "screenshot_exclude_from_history": True,
 
+    "push_port": 8387,
     "adopt_on_connect": False,
     "dedup_ttl_s": 90.0,
     "reconnect_min_s": 1.0,
@@ -228,6 +229,26 @@ def build_hub(cfg: dict) -> Hub:
     return hub
 
 
+def build_push_listener(cfg: dict, hub: Hub):
+    """The "Send Clip" inbound tier -- see transports/push_listener.py's own docstring for
+    why this direction exists at all. Reuses the same key file as the tcp transport tier;
+    a device that cannot reach this at all just never uses it, so there is nothing to
+    disable per-device.
+    """
+    from transports.push_listener import PushListener
+
+    key_path = os.path.join(HERE, cfg["key_file"])
+    if not os.path.isfile(key_path):
+        log.warning("push listener disabled: %s missing", key_path)
+        return None
+    with open(key_path, "rb") as fh:
+        key = fh.read().strip()
+    if len(key) < 32:
+        log.warning("push listener disabled: key file is too short")
+        return None
+    return PushListener(int(cfg.get("push_port", 8387)), key, hub)
+
+
 # ---------------------------------------------------------------- status
 
 def cmd_status(cfg: dict) -> int:
@@ -301,9 +322,12 @@ def main() -> int:
         return 2
 
     hub = build_hub(cfg)
+    push_listener = build_push_listener(cfg, hub)
 
     def handle_signal(signum, frame):
         log.info("signal %s, shutting down", signum)
+        if push_listener is not None:
+            push_listener.stop()
         hub.stop()
         guard.release()
         sys.exit(0)
@@ -314,12 +338,16 @@ def main() -> int:
     log.info("CopyClip starting (pid %d, devices: %s)", os.getpid(),
              ", ".join(d["name"] for d in cfg["devices"] if d.get("enabled", True)))
     hub.start()
+    if push_listener is not None:
+        push_listener.start()
     try:
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
         pass
     finally:
+        if push_listener is not None:
+            push_listener.stop()
         hub.stop()
         guard.release()
     return 0

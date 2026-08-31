@@ -1,9 +1,15 @@
 """Tier 1 transport: ClipBridge over a persistent `adb shell` pipe across Tailscale.
 
-Works with zero phone-side setup, which is why it is the default. Its one real weakness
-is that wireless ADB does not survive a phone reboot on this device (`service.adb.tcp.port`
-is set but `persist.adb.tcp.port` is not), and fixing that needs root, which is off limits.
-Tier 2 exists for that case.
+Works with zero phone-side setup, which is why it is the default. In principle, wireless ADB
+does not survive a phone reboot (`service.adb.tcp.port` is set but `persist.adb.tcp.port` is
+not, and making that persistent needs root, which is off limits) -- but in practice, once
+Android's own Wireless Debugging has been paired once with a remembered network (which
+Shizuku setup for Tier 2 already requires), that pairing itself survives reboot and reopens
+the wireless adb listener automatically, and this tier benefits from that for free: confirmed
+2026-08-31 by a real phone reboot, `service.adb.tcp.port` back at 5555 within 5 minutes, no
+cable touched. Only a device that has never paired Wireless Debugging/Shizuku with a network
+(a freshly added device, e.g. a new Pixel before its first pairing) actually needs the manual
+`adb -d tcpip 5555` re-arm documented in README.
 """
 
 from __future__ import annotations

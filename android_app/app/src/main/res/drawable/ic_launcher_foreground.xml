@@ -1,0 +1,28 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Shrunk twice now (0.85x, then another 0.85x = ~72% of the original design), both
+         times centered on (54,54). First pass fixed real cropping (tab reached y=20,
+         outside the ~21-87 adaptive-icon safe zone); this second pass is the user's own
+         follow-up "still looks too big" call once seeing it live on a real launcher. -->
+    <!-- clipboard board -->
+    <path
+        android:fillColor="#E4E6EC"
+        android:pathData="M38,35 L70,35 L70,79 L38,79 Z" />
+    <!-- clip tab, in the app's primary accent -->
+    <path
+        android:fillColor="#7AA2FF"
+        android:pathData="M47,29 L62,29 L62,38 L47,38 Z" />
+    <!-- content lines, top one in the "synced" teal accent -->
+    <path
+        android:fillColor="#6FD8C7"
+        android:pathData="M44,46 L64,46 L64,49 L44,49 Z" />
+    <path
+        android:fillColor="#9AA1B2"
+        android:pathData="M44,54 L64,54 L64,57 L44,57 Z" />
+    <path
+        android:fillColor="#9AA1B2"
+        android:pathData="M44,63 L58,63 L58,66 L44,66 Z" />
+</vector>

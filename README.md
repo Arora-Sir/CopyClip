@@ -1,20 +1,34 @@
 # CopyClip
 
-One clipboard across **predator-helios-300** (Windows 11), **s24-ultra** (Galaxy S24 Ultra)
-and **tab-s10-ultra** (Galaxy Tab S10 Ultra), over Tailscale.
+One clipboard across **predator-helios-300** (Windows 11), **s24-ultra** (Galaxy S24 Ultra),
+**tab-s10-ultra** (Galaxy Tab S10 Ultra), and **pixel** (a 2016 Google Pixel), over
+Tailscale. Pixel is the one with a real quirk (it needs a manual re-arm after a reboot, see
+[Configuration](#configuration)'s `_pixel` note), the other two just work.
 
 Setup and quick reference below. For the full architecture, wire protocol, every tuning
 knob and why it's set the way it is, and postmortems of real bugs found in production, see
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
-Copy anywhere, paste anywhere. No app installed on either Samsung device, no cloud, no
-account, no pip dependencies.
+Copy anywhere, paste anywhere. No cloud, no account, no pip dependencies, and **no app
+required on any of the three phones/tablets**, `ClipBridge.dex` runs under the shell UID
+over a plain `adb` pipe, entirely managed from the laptop, no shared key needed for that.
+`pixel`'s only real quirk: its Android version predates the OS feature that gives phone/tab
+reboot-proof adb, so it needs a manual `adb -d tcpip 5555` re-arm after a cold boot, same
+sync either way once that's done. It also has a real installed app (`android_app/`) on top,
+purely for the manual "Send Clip" push as a fallback for the moments it hasn't been
+re-armed yet, that's the one place a shared key and a hub address actually apply. See
+[SETUP.md](SETUP.md) for the full installation runbook, on this or a new device.
 
 ```
-copy on laptop  ->  phone and tablet both have it
-copy on phone   ->  laptop has it   (tablet already did, via Samsung)
-copy on tablet  ->  laptop has it   (phone already did, via Samsung)
+copy on laptop  ->  phone, tablet, and pixel all have it
+copy on phone   ->  laptop and pixel have it   (tablet already did, via Samsung)
+copy on tablet  ->  laptop and pixel have it   (phone already did, via Samsung)
+copy on pixel   ->  laptop, phone, and tablet all have it
 ```
+
+`pixel` is standalone, no Samsung partner of its own, so every copy reaches it directly and
+its own copies reach everyone else directly too. It just needs re-arming after a reboot
+(above), everything else about it works exactly like the laptop.
 
 ## Measured performance
 
@@ -76,9 +90,11 @@ tablet is not on the path at all. Full detail, including what CopyClip's protoco
 
 ## Setup
 
-Everything needed is already on this machine. Nothing to `pip install`.
+**Full step-by-step runbook, laptop through every Android tier: [SETUP.md](SETUP.md).**
+Quick version if everything is already configured once:
 
-**1. Build the on-device bridge** (once, and after any edit to `ClipBridge.java`):
+**1. Build the on-device bridge** (once, and after any edit to `ClipBridge.java`, the
+Shizuku-hosted tier reuses this exact same dex, see [SETUP.md](SETUP.md) §2):
 
 ```bash
 powershell -File android\build_dex.ps1
@@ -90,29 +106,31 @@ powershell -File android\build_dex.ps1
 python copyclip.py --status
 ```
 
-**3. Run it** (or just double-click `Start CopyClip.bat`, or the Desktop shortcut):
+**3. Run the laptop side** (tray icon, dashboard, autostarts at login on its own):
 
 ```bash
-powershell -File start_copyclip.ps1
+python windows_app\tray.py
 ```
 
-**4. Optional, start automatically at logon:**
-
-```bash
-powershell -File install_autostart.ps1
-```
-
-Undo with `uninstall_autostart.ps1`. This is the only step that changes anything outside
-this folder.
+Nothing to `pip install` on the laptop. Start Menu shortcut: `powershell -File
+windows_app\create_shortcut.ps1`.
 
 ---
 
 ## How it works
 
-Neither Samsung device runs an installed app. `ClipBridge.dex` executes under the **shell
-UID** via `app_process`, which is the only non-root identity Android grants background
-clipboard access to (`appops` confirms `com.android.shell READ_CLIPBOARD: allow`). Same
-mechanism scrcpy uses.
+None of the three phones/tablets need an installed app for actual sync. `ClipBridge.dex`
+executes under the **shell UID** via `app_process`, which is the only non-root identity
+Android grants background clipboard access to (`appops` confirms `com.android.shell
+READ_CLIPBOARD: allow`). Same mechanism scrcpy uses. This is true for `pixel` too, it just
+also needs a manual `adb -d tcpip 5555` re-arm after a cold boot, since its Android version
+predates persistent Wireless Debugging pairing. An installed app (`android_app/`, package
+`com.mohitarora.copyclip`) exists on top of that, `pixel`-specific: purely a manual "Send
+Clip" push for the moments it hasn't been re-armed yet. Its own attempt at a Shizuku-hosted
+automatic bridge is a dead end on this specific device (Shizuku there only ever grants root,
+which this project refuses to use for anything), so don't rely on it, plain adb above is
+pixel's real sync path. See [SETUP.md](SETUP.md) for both paths,
+[ARCHITECTURE.md](ARCHITECTURE.md) for the full mechanism.
 
 ```
         +--------------- Samsung sync domain ----------------+
@@ -222,22 +240,30 @@ domain, and that mirrored clips never re-transfer their body.
 
 ### "adb connect failed" after rebooting a device
 
-Expected, and it is not a network problem: Tailscale auto-starts and the device stays
-pingable. What dies is adbd's TCP listener. `adb tcpip 5555` only sets the *runtime*
-property `service.adb.tcp.port`, which is wiped on boot, and `persist.adb.tcp.port` is empty
-on both devices.
+Mostly does NOT happen in practice, once a device has paired Android's Wireless Debugging
+(or Shizuku) with a remembered network at least once -- confirmed 2026-08-31 by a real phone
+reboot: `service.adb.tcp.port` was back at 5555 within 5 minutes, zero cable touched. The
+phone's adb keystore (`adb shell dumpsys adb`) shows a Shizuku-authorized key plus a
+remembered Wi-Fi AP list, which is almost certainly why: that pairing survives reboot on the
+OS side and reopens the wireless listener on its own, independent of `service.adb.tcp.port`
+itself being a wiped-on-boot runtime property (that part of the explanation below is still
+accurate, it is just not the whole story, and it is not something CopyClip or this repo
+controls either way).
 
-Re-arm with the device on USB once:
+A device that has genuinely never been through that pairing -- freshly added, before its
+first setup, like a new Pixel -- does need a manual re-arm. Do it once, with the device on
+USB:
 
 ```bash
 adb -d tcpip 5555
 ```
 
-The daemon reconnects on its own. Each device reconnects independently, so one device
-rebooting never stops the other from working.
-
-(The tablet has Android's Wireless debugging enabled, which *does* survive reboot, but that
-mode uses a random mDNS-advertised port and mDNS does not cross Tailscale.)
+`adb tcpip 5555` only ever sets the *runtime* property `service.adb.tcp.port`, wiped on
+reboot on its own (`persist.adb.tcp.port` stays empty, and making that persistent needs
+root, off limits here) -- so without a Wireless Debugging/Shizuku pairing already in place,
+each real reboot does need this redone. The daemon reconnects on its own either way once the
+port is live. Each device reconnects independently, so one device rebooting never stops the
+other from working.
 
 ### Nothing syncs, log shows `LOCK 1`
 

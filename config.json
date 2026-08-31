@@ -12,8 +12,16 @@
       "transport": "adb",
       "device": "100.64.0.12:5555",
       "enabled": true
+    },
+    {
+      "name": "pixel",
+      "transport": "adb",
+      "device": "100.64.0.13:5555",
+      "enabled": true
     }
   ],
+
+  "_pixel": "Enabled 2026-09-01: same zero-root plain-adb tier phone/tab use, works exactly like them once wireless adb is armed. The one real difference: it needs a manual USB re-arm (adb -d tcpip 5555, <software>\\Phone\\Pixel\\rearm_wireless_adb.bat) after every cold start, since it has no non-root path to a persistent pairing the way phone/tab do (Android's Wireless Debugging pairing doesn't exist before Android 11, and this device's final OS version is Android 10). Until re-armed after a reboot, this entry just sits unreachable and the daemon retries with its normal backoff, harmless. Send Clip (the installed android_app/) still exists as a same-day fallback for a moment it hasn't been re-armed yet. The real ClipBridge crash once found on this device (BUG-009) is fixed and stays in the codebase.",
 
   "_domains": "Devices that already mirror each other by themselves. CopyClip writes to ONE member and lets Samsung Continuity distribute internally; it never syncs phone to tab itself. grace_s is how long Continuity gets to propagate before a probe counts as missed.",
   "domains": [
@@ -45,6 +53,9 @@
 
   "_screenshot_exclude_from_history": "A large device-synced image was observed evicting other entries from Windows Clipboard History (Win+V) -- see bugs/BUG-005's Open points. Excluding it from History fixes that, at the cost of the synced image itself never appearing in the Win+V list (Ctrl+V still pastes it correctly either way -- this only affects History's own bookkeeping, not the live clipboard). Set to false to go back to showing synced images in Win+V history and accept the occasional eviction of other entries.",
   "screenshot_exclude_from_history": true,
+
+  "_push_port": "Hub-side listener for the 'Send Clip' manual fallback (transports/push_listener.py) -- a device dials IN here instead of the hub polling it, for devices background sync cannot reach (pixel). Same copyclip.key, mutual HMAC handshake either direction.",
+  "push_port": 8387,
 
   "_adopt_on_connect": "false keeps a reconnect from overwriting what you just copied on the laptop with the device's older clip.",
   "adopt_on_connect": false,

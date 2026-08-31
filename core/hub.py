@@ -47,6 +47,9 @@ class Hub:
         self.baseline_store = baseline_store
         self.tick_s = tick_s
         self.adopt_on_connect = adopt_on_connect
+        # Plain bool, not lock-guarded: a UI toggle racing one in-flight clip by a few
+        # milliseconds is harmless, and CPython's GIL already makes the read/write atomic.
+        self.paused = False
 
         self._stop = threading.Event()
         self._ticker: threading.Thread | None = None
@@ -167,6 +170,9 @@ class Hub:
 
     def on_clip(self, payload: ClipPayload) -> None:
         """A clip was observed on payload.origin."""
+        if self.paused:
+            log.debug("paused; ignoring clip from %s", payload.origin)
+            return
         with self._route_lock:
             sha = payload.sha256
             source = payload.origin

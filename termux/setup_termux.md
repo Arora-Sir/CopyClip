@@ -50,6 +50,22 @@ sh ~/rish -c id
 
 Expect `uid=2000(shell)`. If it errors, Shizuku is not running; start it and retry.
 
+**Gating check, not optional -- confirmed the hard way on a Pixel (2026-08-31):** `rish`'s
+output UID depends entirely on how Shizuku itself was started. If Shizuku was started via its
+**root** mode (Magisk), `rish -c id` returns `uid=0(root) ... context=u:r:magisk:s0`, not
+`uid=2000(shell)` -- meaning `spawn_bridge()` below would launch `ClipBridge.java` **as
+root**, which this project never does, for any device, for any reason (see this repo's
+`CLAUDE.md`). Do not proceed past this check if it doesn't say `uid=2000(shell)` exactly.
+There is no safe variant of this (e.g. `su 2000 -c ...` to hand off to shell UID) that makes
+root's involvement acceptable here -- root doing anything in this chain is the thing being
+avoided, not just ClipBridge's own final UID. If Shizuku is root-mode on your device and
+Android 11+'s Wireless Debugging pairing isn't available to switch it to ADB mode (e.g. the
+device is stuck on Android 10, as this Pixel is), **Tier 2 cannot give you a reboot-proof,
+root-free connection on that device** -- it would need either an adb-shell-launched Shizuku
+restart every boot (no better than Tier 1's own USB re-arm) or root, and both defeat the
+point of using this tier at all. Tier 1 with a manual re-arm, or a different sync path
+entirely for that one device, are the real remaining options in that case.
+
 ### 4. Copy the bridge and a shared key onto the phone
 
 From the laptop:

@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The bridge server is a plain TCP socket (see shizuku/BridgeServer.kt) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application
+        android:name=".CopyClipApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".service.SyncForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- "Send Clip" notification action/in-app button target, see its own doc comment
+             for why this needs a genuinely visible, focused window (a Theme.NoDisplay
+             trampoline was tried and measured to fail the platform's own focus check). -->
+        <activity
+            android:name=".SendClipActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:label="Sending clip" />
+
+        <!-- Not exported: only the system can genuinely send BOOT_COMPLETED, and this keeps
+             it that way rather than trusting the intent-filter match alone. -->
+        <receiver
+            android:name=".service.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Fallback tier for devices that cannot hold Shizuku without root (the pixel).
+             Off by default, see MainScreen.kt's own opt-in toggle and disclosure; a
+             manifest declaration alone does not enable anything, the user must still turn
+             it on in Settings > Accessibility, same as any other accessibility-service app. -->
+        <service
+            android:name=".accessibility.ClipAccessibilityService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- Shizuku's own required provider. Not exported to other apps for our data:
+             it only lets Shizuku's manager app deliver the ADB/root binder to us. See
+             github.com/RikkaApps/Shizuku-API's own manifest for this exact declaration. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+    </application>
+
+</manifest>
