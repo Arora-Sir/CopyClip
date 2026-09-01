@@ -490,6 +490,28 @@ triggering the laptop's own screenshot-backup feature automatically (proof it wa
 as a genuine image, not text). An unrecognized image format (HEIC, etc.) is reported as a
 plain failure rather than silently transcoded, out of scope for a manual one-shot push.
 
+**Permanently manual, not a gap pending a fix (2026-09-01):** whether the notification's own
+"Send Clip" action could trigger itself automatically on every copy, no tap, was directly
+spiked, not just reasoned about: `bugs/SPIKE-PIXEL-ACCESSIBILITY.md`'s follow-up section
+found the background clipboard-change listener never fires at all while backgrounded on
+this Android version, the notification is denied before any of the app's own code runs.
+There is no mechanism on this platform version to build an automatic trigger on top of, so
+this stays a manual, tap-triggered action indefinitely.
+
+**Notification visibility (2026-09-01):** the sync notification's channel moved from
+`IMPORTANCE_LOW` to `IMPORTANCE_DEFAULT` (a new channel id, `copyclip_sync_v2`, since
+Android ignores importance changes to a channel id that already exists on-device) after a
+real complaint: at LOW, the notification sat collapsed in the shade's quiet section,
+needing a swipe just to see the Send Clip action existed at all. Deliberately not
+`IMPORTANCE_HIGH`/`MAX`: those add a heads-up popup on every post, and this notification
+updates on every poll tick (`POLL_MS`, a few seconds) plus every state change, a banner
+that often would be worse than the problem it solves. `setOnlyAlertOnce(true)` added
+alongside it so those frequent updates don't replay sound/vibration each time. Confirmed
+live: after a single manual tap to expand the notification once, the Send Clip action stays
+visible across subsequent automatic status updates, that expand state is preserved by the
+system across `notify()` calls to the same notification id, not reset per update, so this
+is a true one-time action, not something to repeat after every reboot or update.
+
 ---
 
 ## 7. Tuning knobs

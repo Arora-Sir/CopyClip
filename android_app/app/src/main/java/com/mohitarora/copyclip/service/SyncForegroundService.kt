@@ -44,7 +44,13 @@ data class SyncState(
 class SyncForegroundService : Service() {
 
     companion object {
-        private const val CHANNEL_ID = "copyclip_sync"
+        // A new id, not a renamed "copyclip_sync": once a channel exists on-device, Android
+        // ignores any importance change from createNotificationChannel() on a later app
+        // update, by design, the user is assumed to have already made their own choice for
+        // that channel id. A new id is the only way code can actually raise it. The old
+        // "copyclip_sync" channel is left orphaned on any device that already had it,
+        // harmless, just an unused entry in Settings.
+        private const val CHANNEL_ID = "copyclip_sync_v2"
         private const val NOTIFICATION_ID = 1
         private const val POLL_MS = 4000L
 
@@ -157,8 +163,16 @@ class SyncForegroundService : Service() {
 
     private fun createChannel() {
         val mgr = getSystemService(NotificationManager::class.java)
+        // DEFAULT, not LOW: LOW is what made this collapse into the shade's quiet/minimized
+        // section, needing a swipe to reveal the Send Clip action at all. DEFAULT sorts
+        // higher and shows expanded (actions visible) without that swipe.
+        // Deliberately not HIGH/MAX: those add a heads-up popup banner on every post, and
+        // this notification updates on every poll tick (every few seconds, see POLL_MS) plus
+        // every state change, a banner interrupting the screen that often would make the
+        // phone unusable for anything else. DEFAULT plus setOnlyAlertOnce (below) is the
+        // actual fix for "hard to find", HIGH/MAX solves a different problem this doesn't have.
         val channel = NotificationChannel(
-            CHANNEL_ID, "CopyClip sync", NotificationManager.IMPORTANCE_LOW
+            CHANNEL_ID, "CopyClip sync", NotificationManager.IMPORTANCE_DEFAULT
         ).apply { description = "Shows whether clipboard sync is connected" }
         mgr.createNotificationChannel(channel)
     }
@@ -182,7 +196,12 @@ class SyncForegroundService : Service() {
             .setContentIntent(openIntent)
             .addAction(android.R.drawable.ic_menu_share, "Send Clip", sendClipIntent)
             .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            // This updates on every poll tick, not just real changes -- without this, a
+            // channel that already had sound/vibration configured by the user would replay
+            // it that often, which is a worse annoyance than the swipe-to-see-Send-Clip
+            // problem this whole change exists to fix.
+            .setOnlyAlertOnce(true)
             .build()
     }
 
