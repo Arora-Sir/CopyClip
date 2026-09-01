@@ -5,8 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
@@ -19,9 +17,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import com.mohitarora.copyclip.MainActivity
 import com.mohitarora.copyclip.SendClipActivity
 import com.mohitarora.copyclip.SettingsStore
-import com.mohitarora.copyclip.accessibility.ClipAccessibilityService
 import com.mohitarora.copyclip.shizuku.ShizukuManager
-import java.util.concurrent.atomic.AtomicInteger
 
 data class SyncState(
     val shizukuAlive: Boolean = false,
@@ -29,8 +25,6 @@ data class SyncState(
     val bridgeRunning: Boolean = false,
     val bridgeStatus: String = "not started",
     val port: Int = SettingsStore.DEFAULT_PORT,
-    val accessibilityEnabled: Boolean = false,
-    val accessibilityClipEvents: Int = 0,
 )
 
 /**
@@ -61,7 +55,6 @@ class SyncForegroundService : Service() {
     private lateinit var settings: SettingsStore
     private var pollThread: Thread? = null
     @Volatile private var running = false
-    private val accessibilityClipEvents = AtomicInteger(0)
     // Sticky once set: retrying startBridge() against the same root-mode Shizuku would just
     // repeat the same refusal forever. Cleared only by a fresh app process (e.g. after the
     // user actually reconfigures Shizuku and reopens the app), not by this loop itself.
@@ -71,26 +64,6 @@ class SyncForegroundService : Service() {
         super.onCreate()
         settings = SettingsStore(this)
         createChannel()
-        registerAccessibilityClipListener()
-    }
-
-    /**
-     * The pixel-tier spike, and (once confirmed) the real read path: a completely ordinary
-     * ClipboardManager listener. Nothing here is privileged -- the privilege, if it exists,
-     * comes entirely from ClipAccessibilityService being enabled, which is what
-     * bugs/SPIKE-PIXEL-ACCESSIBILITY.md exists to actually measure rather than assume. This
-     * listener is registered unconditionally (harmless on phone/tab too, it just won't fire
-     * in the background there without their own accessibility grant), so the exact same build
-     * runs on every device.
-     */
-    private fun registerAccessibilityClipListener() {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-            ?: return
-        clipboard.addPrimaryClipChangedListener {
-            val count = accessibilityClipEvents.incrementAndGet()
-            Log.i("CopyClip", "accessibility-path clip change observed (#$count)")
-            publishState()
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -176,8 +149,6 @@ class SyncForegroundService : Service() {
             bridgeRunning = status.startsWith("listening") || status.startsWith("client"),
             bridgeStatus = status,
             port = settings.port,
-            accessibilityEnabled = ClipAccessibilityService.isEnabled(this),
-            accessibilityClipEvents = accessibilityClipEvents.get(),
         )
         updateNotification(status)
     }

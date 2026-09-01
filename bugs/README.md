@@ -34,7 +34,12 @@ in real use, not merely when a test passes.
   `ClipboardService` log shows a strict focus-or-system-service check with no accessibility
   exemption, denying CopyClip and three unrelated apps (including a Google system app)
   identically. Plausibly explains, via the same root cause, why Sefirah's own pixel -> laptop
-  direction has never worked either. **Blocks item E of the app-rewrite plan as designed.**
+  direction has never worked either. **Follow-up (2026-09-01), same file**: also measured
+  that the plain clipboard-change *listener* never fires in the background at all on this
+  device, a stronger, separate negative result (not just "reads get denied", "you never even
+  find out a change happened"). Item E's code (`ClipAccessibilityService`, the listener,
+  its manifest entry) was removed outright as a result, not kept around, there is no
+  mechanism left to build on for this Android version. Closed, not blocked.
 - **[SPIKE-ANDROID-USERSERVICE.md](SPIKE-ANDROID-USERSERVICE.md)**, the mechanism itself:
   a real Android app (`android_app/`) can run ClipBridge via a Shizuku `UserService` that
   spawns the same unmodified `clipbridge.dex` and speaks the existing TCP protocol, instead

@@ -100,13 +100,52 @@ version -- not yet identified. The accessibility grant made on the real device d
 was disabled afterward (`bugs/README.md` convention: clean up spike side effects that serve no
 further purpose once a spike concludes negative).
 
+## Follow-up spike (2026-09-01): does the plain clipboard-change listener even fire in the background, separate question from whether its *content read* succeeds
+
+Asked directly: could "Send Clip" trigger itself automatically on every copy, instead of
+needing a tap, by reacting to `ClipboardManager.addPrimaryClipChangedListener` firing in the
+background and launching `SendClipActivity` (which already reads correctly once genuinely
+focused, see ARCHITECTURE.md §6.8) with no user interaction anywhere in the chain? This is a
+narrower, different claim than the one above: not "does an enabled AccessibilityService
+unlock reads", but "does the listener callback even run at all while backgrounded, before
+any read is attempted".
+
+**Result: no, measured twice, not inferred.** The listener was already registered
+unconditionally in `SyncForegroundService.onCreate()` (harmless, matching this file's own
+main spike). Added a temporary `startActivity(SendClipActivity)` call as the first line of
+the callback body, immediately after a log line (`"accessibility-path clip change
+observed"`) that would need to print before anything else could happen. Backgrounded the
+app, changed the clipboard externally the same way as the main spike (`ClipBridge ... set`
+over an independent shell-UID process), twice, cleanly isolated with `logcat -c` between
+runs. Neither the log line nor the `startActivity` attempt ever appeared, on either run;
+the only related log line was `ClipboardService: Denying clipboard access to
+com.mohitarora.copyclip, application is not in focus neither is a system service for user
+0`, meaning the *notification* itself is gated by the same focus check the read is, not
+just a subsequent read attempt once notified. There is no way, on this device, to even
+learn that a background copy happened, let alone act on it.
+
+**Verdict, updated:** no code changed the way the original spike's did (there is no
+"different mechanism" left to keep this around for, and none is known on this Android
+version). `registerAccessibilityClipListener()`, `ClipAccessibilityService.kt`, its
+manifest declaration, and `accessibility_service_config.xml` were all removed outright
+(2026-09-01), superseding this file's own earlier "stays in the codebase in case a
+different mechanism is found later" decision, now backed by two independent negative
+results (content-read denied; notification-callback never even fires) rather than the one
+this file originally recorded. `SyncState`'s `accessibilityEnabled`/`accessibilityClipEvents`
+fields, already unused by any UI (the card that displayed them was removed earlier the same
+day), were removed with it. Confirmed clean afterward: a rebuild succeeded, and
+`enabled_accessibility_services` no longer lists this app on the real device after
+reinstalling. "Send Clip" (§6.8) remains a manual, tap-triggered action, permanently, not a
+temporary state pending a fix, there is nothing left to fix on this platform version.
+
 ## Cleanup performed
 
 `ClipAccessibilityService` was disabled on the pixel (`adb shell settings put secure
 enabled_accessibility_services`, removing this app's entry) after the second measurement --
 leaving an accessibility grant active with no working purpose is unnecessary exposure, not a
-convenience worth keeping. The app itself (with the service declared but unused) was left
-installed; the manifest declaration and `ClipAccessibilityService.kt`/config XML stay in the
-codebase in case a different mechanism is found later, same as `android/spike/`'s own
-kept-for-reference convention, but nothing about the pixel's real sync state changed --
-`config.json`'s pixel entry is untouched (`enabled: false`, Sefirah still covering it).
+convenience worth keeping. `config.json`'s pixel entry was untouched by this spike itself
+(a later, separate session change moved it to `"enabled": true` on plain Tier 1 adb, see
+ARCHITECTURE.md §8, unrelated to accessibility). The app code this section originally left
+in place "in case a different mechanism is found later" was fully removed in the follow-up
+spike above, once two independent negative results made that unlikely enough not to be
+worth the dead weight.

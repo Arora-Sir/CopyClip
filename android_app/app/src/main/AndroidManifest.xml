@@ -49,22 +49,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- Fallback tier for devices that cannot hold Shizuku without root (the pixel).
-             Off by default, see MainScreen.kt's own opt-in toggle and disclosure; a
-             manifest declaration alone does not enable anything, the user must still turn
-             it on in Settings > Accessibility, same as any other accessibility-service app. -->
-        <service
-            android:name=".accessibility.ClipAccessibilityService"
-            android:exported="false"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_service_config" />
-        </service>
-
         <!-- Shizuku's own required provider. Not exported to other apps for our data:
              it only lets Shizuku's manager app deliver the ADB/root binder to us. See
              github.com/RikkaApps/Shizuku-API's own manifest for this exact declaration. -->
