@@ -81,12 +81,19 @@ choice, so it needs `adb -d tcpip 5555` re-armed over USB after every cold start
 machine has a double-click convenience script for that at
 `<software>\Phone\Pixel\rearm_wireless_adb.bat`, personal tooling, not part of this repo).
 Until re-armed, this device's entry just sits unreachable and the daemon retries with its
-normal backoff, harmless, same as any other device being briefly offline. This also
-resolved a real, previously-unexplained symptom: an S24-to-pixel copy going through the
-laptop as an intermediate hop (S24 to laptop over CopyClip's own reliable path, then laptop
-to pixel, now also CopyClip's own reliable path instead of depending on a separate tool for
-that second leg) no longer depends on anything outside this codebase for that specific
-content, see §8's "pixel moved to Tier 1" entry for the full story.
+normal backoff, harmless, same as any other device being briefly offline. **While
+unreachable, this also explains what actually keeps working and what doesn't**, confirmed
+live 2026-09-01: an S24-to-pixel copy still arrives, but not via this Tier 1 link at all,
+it's really S24-to-laptop (CopyClip's own `phone -> laptop` path, unaffected by pixel's own
+state) and then laptop-to-pixel as a *second*, independent hop that only Sefirah completes
+while Tier 1 is down (CopyClip's own attempt at that second hop queues in the outbox
+instead, `outbox[node:pixel] holding ... target unavailable`, and flushes automatically the
+moment Tier 1 reconnects). The reverse direction has no such fallback: pixel-to-anyone has
+no automatic path at all while unreachable, Sefirah's own pixel-to-laptop direction has
+never worked (see `bugs/SPIKE-PIXEL-ACCESSIBILITY.md`), so Send Clip (§6.8) is the only way
+out during that window, a manual tap, not automatic. Once re-armed, both hops become
+CopyClip's own direct, ACK-confirmed path and Sefirah's role in this specific chain becomes
+redundant again, not required, see §8's "pixel moved to Tier 1" entry for the full story.
 
 The installed app (`android_app/`) stays installed on `pixel` regardless, now purely for
 "Send Clip" (§6.8, now also image-capable) as the fallback for a moment it hasn't been
@@ -712,11 +719,17 @@ Android-version-specific (no persistent Wireless Debugging pairing before Androi
 tier-specific. *Fix:* `config.json`'s pixel entry flipped to `"transport": "adb", "enabled":
 true`; verified live both directions after a cold-connection retry settled (`laptop ->
 pixel` and `pixel -> laptop`, exact content, confirmed by direct base64 decode, not log
-inference alone). *Side effect, also real:* this incidentally explained and fixed a
-previously-unexplained intermittent symptom (S24-to-pixel copies sometimes not arriving):
-that path was always S24-to-laptop (CopyClip, reliable) then laptop-to-pixel (Sefirah, a
-third-party app with no logs or guarantees available to this codebase), and the second hop
-is now also CopyClip's own ACK-confirmed, retry-queued path instead. *Generalizable lesson,
+inference alone). *Side effect, also real:* this incidentally explained a previously-
+unexplained intermittent symptom (S24-to-pixel copies sometimes not arriving): that path
+was always S24-to-laptop (CopyClip, reliable) then laptop-to-pixel (Sefirah, a third-party
+app with no logs or guarantees available to this codebase). Only fixed while Tier 1 is
+actually up, though, not permanently: whenever pixel is unreachable (the common case right
+after a reboot, until re-armed, see the `_pixel` config note), that second hop falls back
+to depending on Sefirah again exactly as before, confirmed live 2026-09-01, `phone ->
+laptop` kept firing normally in the log the whole time pixel sat unreachable, with
+CopyClip's own attempt at the second hop queued in the outbox instead of delivered. See §2's
+own update note for the fuller breakdown of what does and doesn't keep working during that
+window. *Generalizable lesson,
 same shape as the previous day's:* a device's constraint (pixel needs Shizuku, therefore
 root-refused, therefore needs a fallback) had been treated as ruling out its most basic tier
 too, without that being separately checked. The manual-rearm cost of Tier 1 was already

@@ -235,6 +235,16 @@ like it already does for any device that's merely offline. `python copyclip.py -
 should list it as connected. Copy something on each end and confirm it appears on the other.
 Nothing to install on the device itself, ever.
 
+**What actually happens while this device is unreachable** (e.g. between a reboot and
+re-arming it), if it also has a separate tool like Sefirah paired to the laptop: copies
+*from* other devices still arrive, but not through this daemon, the content reaches the
+laptop first through this daemon's own already-working link to whatever device it came
+from, then the separate tool relays it onward from the laptop's own clipboard as an
+independent second hop. Copies *from* this device have no such fallback: nothing else in
+this setup can complete that direction, only this daemon can, so a manual push (§3.4) is
+the only way out until it's reachable again. Confirmed live 2026-09-01, see ARCHITECTURE.md
+§2's own update note for the full breakdown.
+
 ---
 
 ## 3. Optional extra: "Send Clip" manual push (any device, but built for one that fails §2)
