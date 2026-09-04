@@ -117,6 +117,7 @@ public final class ClipBridge {
     private static final String EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE";
 
     private static final long POLL_MS = 250L;
+    private static final long POLL_MS_LOCKED = 1500L;
 
     private static Object clipboard;
     private static Object trust;
@@ -670,7 +671,7 @@ public final class ClipBridge {
                     }
                 }
                 if (locked) {
-                    Thread.sleep(POLL_MS);
+                    Thread.sleep(POLL_MS_LOCKED);
                     continue; // reads return null while locked; nothing useful to do
                 }
 
@@ -1088,6 +1089,9 @@ public final class ClipBridge {
         new File("/sdcard/Pictures/Screenshots"),
     };
 
+    private static final long[] lastDirMtimes = new long[SCREENSHOT_DIRS.length];
+    private static File cachedNewestScreenshot = null;
+
     private static String lastScreenshotName;
 
     // Recently-pushed screenshot hashes, so a rare case where Samsung's own screenshot flow
@@ -1162,6 +1166,19 @@ public final class ClipBridge {
     }
 
     private static File findNewestScreenshot() {
+        boolean anyDirChanged = false;
+        for (int i = 0; i < SCREENSHOT_DIRS.length; i++) {
+            File dir = SCREENSHOT_DIRS[i];
+            long mtime = dir.lastModified();
+            if (mtime != lastDirMtimes[i]) {
+                anyDirChanged = true;
+                lastDirMtimes[i] = mtime;
+            }
+        }
+        if (!anyDirChanged && cachedNewestScreenshot != null) {
+            return cachedNewestScreenshot;
+        }
+
         File newest = null;
         long newestTime = -1L;
         for (File dir : SCREENSHOT_DIRS) {
@@ -1180,6 +1197,7 @@ public final class ClipBridge {
                 }
             }
         }
+        cachedNewestScreenshot = newest;
         return newest;
     }
 

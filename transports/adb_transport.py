@@ -81,6 +81,16 @@ class AdbTransport(Transport):
             raise TransportError(
                 f"{self.dex_path} missing. Run android\\build_dex.ps1 first."
             )
+        local_size = os.path.getsize(self.dex_path)
+        try:
+            stat_res = self._adb("shell", f"stat -c %s {REMOTE_DEX}", timeout=5)
+            remote_size_str = stat_res.stdout.strip()
+            if stat_res.returncode == 0 and remote_size_str.isdigit() and int(remote_size_str) == local_size:
+                log.debug("[%s] remote DEX up to date (%d bytes); skipping push", self.device, local_size)
+                return
+        except Exception:
+            pass
+
         res = self._adb("push", self.dex_path, REMOTE_DEX, timeout=60)
         if res.returncode != 0:
             raise TransportError(f"adb push failed: {(res.stdout + res.stderr).strip()!r}")

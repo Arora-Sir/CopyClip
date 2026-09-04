@@ -69,6 +69,7 @@ class SyncForegroundService : Service() {
     // repeat the same refusal forever. Cleared only by a fresh app process (e.g. after the
     // user actually reconfigures Shizuku and reopens the app), not by this loop itself.
     @Volatile private var rootRefusalReason: String? = null
+    @Volatile private var lastProcessedConfMtime = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -115,19 +116,30 @@ class SyncForegroundService : Service() {
             // Check for incoming auto-provisioning config from laptop hub
             val confFile = File("/data/local/tmp/copyclip_conf.json")
             if (confFile.exists()) {
-                try {
-                    val text = confFile.readText()
-                    val json = JSONObject(text)
-                    val keyHex = json.optString("key_hex", "")
-                    val hubHost = json.optString("hub_host", "")
-                    val pushPort = json.optInt("push_port", SettingsStore.DEFAULT_PUSH_PORT)
-                    val deviceName = json.optString("device_name", "pixel")
-                    if (keyHex.isNotBlank()) {
-                        settings.saveFromConf(keyHex, hubHost, pushPort, deviceName)
-                        Log.i("CopyClip", "Auto-provisioned configuration from desktop hub")
+                val mtime = confFile.lastModified()
+                if (mtime > lastProcessedConfMtime) {
+                    lastProcessedConfMtime = mtime
+                    try {
+                        val text = confFile.readText()
+                        val json = JSONObject(text)
+                        val keyHex = json.optString("key_hex", "")
+                        val hubHost = json.optString("hub_host", "")
+                        val pushPort = json.optInt("push_port", SettingsStore.DEFAULT_PUSH_PORT)
+                        val deviceName = json.optString("device_name", "pixel")
+                        if (keyHex.isNotBlank()) {
+                            if (settings.hmacKeyHex != keyHex || settings.hubHost != hubHost
+                                || settings.port != pushPort || settings.deviceName != deviceName) {
+                                settings.saveFromConf(keyHex, hubHost, pushPort, deviceName)
+                                Log.i("CopyClip", "Auto-provisioned configuration from desktop hub")
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        Log.e("CopyClip", "Failed reading auto-provision file", t)
                     }
-                } catch (t: Throwable) {
-                    Log.e("CopyClip", "Failed reading auto-provision file", t)
+                    try {
+                        confFile.delete()
+                    } catch (ignored: Throwable) {
+                    }
                 }
             }
 
