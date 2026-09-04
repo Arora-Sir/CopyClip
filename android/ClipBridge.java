@@ -27,6 +27,7 @@ import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -512,6 +513,15 @@ public final class ClipBridge {
         if (desc.hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML)) {
             return ClipDescription.MIMETYPE_TEXT_HTML;
         }
+        // Scan for image MIME types before falling back to slot 0: Android content providers
+        // often declare ["application/octet-stream", "image/png"] or multiple types. If any
+        // slot is an image, prioritize the image MIME so it is not dropped as non-text.
+        for (int i = 0; i < desc.getMimeTypeCount(); i++) {
+            String m = desc.getMimeType(i);
+            if (m != null && m.toLowerCase(Locale.ROOT).startsWith("image/")) {
+                return m;
+            }
+        }
         return desc.getMimeType(0);
     }
 
@@ -731,6 +741,9 @@ public final class ClipBridge {
                             stampOnly = rest.equalsIgnoreCase("stamp");
                             emit("ACK mode " + (stampOnly ? "stamp" : "full"));
                             break;
+                        case "CONF":
+                            handleConf(rest);
+                            break;
                         case "PING":
                             emit("PONG");
                             break;
@@ -749,6 +762,21 @@ public final class ClipBridge {
         }
         // Parent closed the pipe: the daemon is gone, so we should go too.
         System.exit(0);
+    }
+
+    private static void handleConf(String rest) {
+        try {
+            byte[] decoded = Base64.getDecoder().decode(rest);
+            File confFile = new File("/data/local/tmp/copyclip_conf.json");
+            try (FileOutputStream fos = new FileOutputStream(confFile)) {
+                fos.write(decoded);
+            }
+            confFile.setReadable(true, false);
+            confFile.setWritable(true, false);
+            emit("CONF-ACK");
+        } catch (Throwable t) {
+            emit("ERR conf: " + describe(t));
+        }
     }
 
     // ---------------------------------------------------------------- imaging (FakeContext)
@@ -1055,7 +1083,10 @@ public final class ClipBridge {
      * file contents via its sdcard_rw/sdcard_r group membership -- no ContentResolver, no
      * FakeContext needed, plain java.io.File/FileInputStream.
      */
-    private static final File SCREENSHOT_DIR = new File("/sdcard/DCIM/Screenshots");
+    private static final File[] SCREENSHOT_DIRS = new File[] {
+        new File("/sdcard/DCIM/Screenshots"),
+        new File("/sdcard/Pictures/Screenshots"),
+    };
 
     private static String lastScreenshotName;
 
@@ -1099,12 +1130,12 @@ public final class ClipBridge {
     private static ClipDescription pendingImageDesc;
     private static long pendingImageDescSinceMs;
     // Comfortably above the largest gap measured between the real file and the spurious
-    // second clipboard image (~2s); short enough that a genuine standalone image copy is
-    // barely delayed. Known, accepted trade-off: two genuinely different images copied
-    // deliberately less than this far apart on the SAME device, with no screenshot
-    // involved at all, would have the first one superseded -- judged unlikely relative to
-    // how often a screenshot is actually taken (see the bug writeup for the reasoning).
-    private static final long IMAGE_DESC_HOLD_MS = 2_500;
+    // second clipboard image (~3.5s on high-resolution 2960x1788 devices like Tab S10 Ultra);
+    // short enough that a genuine standalone image copy is barely delayed. Known, accepted
+    // trade-off: two genuinely different images copied deliberately less than this far apart
+    // on the SAME device, with no screenshot involved at all, would have the first one
+    // superseded -- judged unlikely relative to how often a screenshot is actually taken.
+    private static final long IMAGE_DESC_HOLD_MS = 4_500;
 
     /**
      * Establishes the starting baseline silently -- called once before the poll loop
@@ -1119,22 +1150,34 @@ public final class ClipBridge {
     private static void initScreenshotWatch() {
         File newest = findNewestScreenshot();
         if (newest != null) {
-            lastScreenshotName = newest.getName();
+            long ageMs = System.currentTimeMillis() - newest.lastModified();
+            // If the newest screenshot was captured very recently (< 90s ago), do NOT
+            // adopt it as a silent baseline. Leaving lastScreenshotName null allows
+            // checkScreenshots() to emit it on the very first poll tick, preventing
+            // screenshots taken during a reconnect or app start from being lost.
+            if (ageMs >= 90_000L) {
+                lastScreenshotName = newest.getName();
+            }
         }
     }
 
     private static File findNewestScreenshot() {
-        File[] files = SCREENSHOT_DIR.listFiles();
-        if (files == null || files.length == 0) {
-            return null;
-        }
         File newest = null;
-        for (File f : files) {
-            if (!f.isFile()) {
+        long newestTime = -1L;
+        for (File dir : SCREENSHOT_DIRS) {
+            File[] files = dir.listFiles();
+            if (files == null || files.length == 0) {
                 continue;
             }
-            if (newest == null || f.lastModified() > newest.lastModified()) {
-                newest = f;
+            for (File f : files) {
+                if (!f.isFile()) {
+                    continue;
+                }
+                long m = f.lastModified();
+                if (newest == null || m > newestTime) {
+                    newest = f;
+                    newestTime = m;
+                }
             }
         }
         return newest;
@@ -1154,48 +1197,132 @@ public final class ClipBridge {
             if (newest == null) {
                 return;
             }
-            // Filename identity only -- lastModified() used to be part of this check too,
-            // but a background process (media scanner, gallery thumbnail regen, cloud
-            // backup) can rewrite the current newest file's bytes in place without any real
-            // new screenshot happening: measured directly, same file size, different
-            // sha256, new mtime, every time (bugs/BUG-005-duplicate-screenshot-push.md).
-            // That used to look like a fresh screenshot and re-pushed the same shot
-            // repeatedly. The filename is what actually identifies "which screenshot" --
-            // Android's own timestamp-based naming already guarantees a genuinely new
-            // capture gets a new name.
             if (lastScreenshotName != null && newest.getName().equals(lastScreenshotName)) {
                 return;
             }
+            // Read only when file write is 100% complete. If still writing, do NOT advance
+            // lastScreenshotName so the next poll will pick it up as soon as it finishes.
+            byte[] raw = readCompleteScreenshotFile(newest);
+            if (raw == null || raw.length <= 0) {
+                // If it timed out after 8s and still is not a valid complete image,
+                // advance lastScreenshotName so we don't spin in an infinite 8-second
+                // blocking loop on every poll tick, starving the main thread.
+                lastScreenshotName = newest.getName();
+                emit("SKIP image/unknown screenshot-incomplete-or-unsupported: " + newest.getName());
+                return;
+            }
             lastScreenshotName = newest.getName();
-            emitScreenshot(newest);
+            emitScreenshot(raw, newest.getName());
         } catch (Throwable t) {
             emit("ERR screenshot: " + describe(t));
         }
     }
 
+    private static boolean isCompleteImage(byte[] data) {
+        if (data == null || data.length < 12) return false;
+        int len = data.length;
+
+        // PNG: must contain IEND chunk
+        if ((data[0] & 0xFF) == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G') {
+            // Standard PNG ends with 12-byte IEND chunk (00 00 00 00 49 45 4E 44 AE 42 60 82)
+            if (len >= 12 && data[len - 8] == 'I' && data[len - 7] == 'E' && data[len - 6] == 'N' && data[len - 5] == 'D') {
+                return true;
+            }
+            // In case of ancillary chunks / trailing bytes, scan backwards up to 4096 bytes for IEND
+            int scanLimit = Math.max(8, len - 4096);
+            for (int i = len - 8; i >= scanLimit; i--) {
+                if (data[i] == 'I' && data[i + 1] == 'E' && data[i + 2] == 'N' && data[i + 3] == 'D') {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // JPEG: starts with SOI (FF D8) and must contain EOI (FF D9)
+        if ((data[0] & 0xFF) == 0xFF && (data[1] & 0xFF) == 0xD8) {
+            // 1. Standard JPEG: ends with FF D9
+            if (len >= 2 && (data[len - 2] & 0xFF) == 0xFF && (data[len - 1] & 0xFF) == 0xD9) {
+                return true;
+            }
+            // 2. Samsung SEF trailer: ends with 'SEFT' (0x53 0x45 0x46 0x54)
+            if (len >= 4 && data[len - 4] == 'S' && data[len - 3] == 'E' && data[len - 2] == 'F' && data[len - 1] == 'T') {
+                return true;
+            }
+            // 3. Trailing metadata / padding: scan backwards from end (up to 64KB) for FF D9
+            int scanLimit = Math.max(2, len - 65536);
+            for (int i = len - 2; i >= scanLimit; i--) {
+                if ((data[i] & 0xFF) == 0xFF && (data[i + 1] & 0xFF) == 0xD9) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // GIF: must end with 0x3B (trailer)
+        if (data[0] == 'G' && data[1] == 'I' && data[2] == 'F') {
+            if (data[len - 1] == 0x3B) return true;
+            int scanLimit = Math.max(6, len - 512);
+            for (int i = len - 1; i >= scanLimit; i--) {
+                if (data[i] == 0x3B) return true;
+            }
+            return false;
+        }
+
+        // BMP: header specifies file size at offset 2 (little endian)
+        if (data[0] == 'B' && data[1] == 'M' && len >= 6) {
+            long bmpSize = (data[2] & 0xFFL) | ((data[3] & 0xFFL) << 8) | ((data[4] & 0xFFL) << 16) | ((data[5] & 0xFFL) << 24);
+            return len >= bmpSize && bmpSize > 0;
+        }
+
+        // WebP: RIFF header specifies file size at offset 4 (little endian)
+        if (len >= 12 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' && data[3] == 'F' &&
+            data[8] == 'W' && data[9] == 'E' && data[10] == 'B' && data[11] == 'P') {
+            long riffSize = (data[4] & 0xFFL) | ((data[5] & 0xFFL) << 8) | ((data[6] & 0xFFL) << 16) | ((data[7] & 0xFFL) << 24);
+            return len >= (riffSize + 8) && riffSize > 0;
+        }
+
+        return true;
+    }
+
+    private static byte[] readCompleteScreenshotFile(File file) {
+        long deadline = System.currentTimeMillis() + 8000L; // Allow up to 8s for slow flash write
+        while (System.currentTimeMillis() < deadline) {
+            long currentLen = file.length();
+            if (currentLen > 100) {
+                try (InputStream is = new FileInputStream(file)) {
+                    byte[] raw = readAllBounded(is, MAX_IMAGE_BYTES);
+                    if (isCompleteImage(raw)) {
+                        return raw;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            try {
+                Thread.sleep(150);
+            } catch (InterruptedException ignored) {
+            }
+        }
+        // Final attempt strictly verified against image completion
+        try (InputStream is = new FileInputStream(file)) {
+            byte[] raw = readAllBounded(is, MAX_IMAGE_BYTES);
+            if (isCompleteImage(raw)) {
+                return raw;
+            }
+        } catch (Exception ignored) {
+        }
+        return null; // Never push an incomplete/half-baked file
+    }
+
     /**
-     * Reads a newly-detected screenshot file directly and routes it through the same
-     * chunked CLIPB/CLIPC machinery a clipboard-sourced image uses (sendChunkedClip) --
-     * this is a new *trigger*, not a new pipeline. No DESC-then-GET two-step: unlike
-     * clipboard content, a screenshot file is never redundantly re-announced by a Samsung
-     * Continuity relay, so there is no "wait for a GET" step to save work on.
+     * Reads a newly-detected screenshot file and routes it through chunked CLIPB/CLIPC.
      */
-    private static void emitScreenshot(File file) {
-        // Deliberately NOT gated on imagingAvailable: unlike clipboard-URI images, this
-        // path never touches FakeContext/ContentResolver at all -- it's a plain file read
-        // via java.io.File/FileInputStream. If FakeContext ever fails to initialize (some
-        // OEM quirk), screenshot watching should keep working regardless; they are
-        // independent capabilities that merely share the outbound chunked-CLIP wire format.
-        long size = file.length();
-        if (size <= 0 || size > MAX_IMAGE_BYTES) {
-            emit("SKIP image/unknown screenshot-oversize-or-empty");
+    private static void emitScreenshot(byte[] raw, String filename) {
+        if (raw == null || raw.length <= 0) {
+            emit("SKIP image/unknown screenshot-read-failed-or-empty");
             return;
         }
-        byte[] raw;
-        try (InputStream is = new FileInputStream(file)) {
-            raw = readAllBounded(is, MAX_IMAGE_BYTES);
-        } catch (Exception e) {
-            emit("SKIP image/unknown screenshot-read-failed:" + describe(e));
+        if (raw.length > MAX_IMAGE_BYTES) {
+            emit("SKIP image/unknown screenshot-oversize");
             return;
         }
         byte[] data;
