@@ -245,6 +245,37 @@ this setup can complete that direction, only this daemon can, so a manual push (
 the only way out until it's reachable again. Confirmed live 2026-09-01, see ARCHITECTURE.md
 §2's own update note for the full breakdown.
 
+### 2.4 Samsung One UI & Pixel Quirks & Recovery Runbook
+
+**1. Samsung Wi-Fi Power Savings & Port 5555 Refusal (10061):**
+On Samsung Galaxy S24 Ultra and Tab S10 Ultra, One UI's aggressive battery management can pause
+the Wireless Debugging listening socket on port 5555 when the screen turns off and locks.
+When this happens, the daemon log will record:
+```
+WARNING copyclip.node.android: [phone] connect failed: adb connect 100.64.0.11:5555 failed:
+'cannot connect to 100.64.0.11:5555: No connection could be made because the target machine
+actively refused it. (10061)'
+```
+**Quick Recovery:**
+Wake or unlock the phone screen, or run the following quick refresh command from PowerShell:
+```powershell
+adb disconnect 100.64.0.11:5555; Start-Sleep 1; adb connect 100.64.0.11:5555
+```
+The daemon detects the live connection within seconds, recovers state, and catches up any clips
+copied in the interim.
+
+**2. OEM Screenshot Storage Directory Variations:**
+Different Android manufacturers store screenshots in different paths:
+- **Samsung One UI (S24 Ultra, Tab S10 Ultra):** `/sdcard/DCIM/Screenshots/`
+- **Stock Android / Google Pixel (Pixel 1) / AOSP:** `/sdcard/Pictures/Screenshots/`
+`ClipBridge.java` checks both paths via `SCREENSHOT_DIRS` on every poll tick, so no manual
+path configuration is required.
+
+**3. Samsung SEF Screenshot Metadata:**
+Samsung screenshots contain trailing Samsung Extended Format metadata ending in `SEFT`.
+`ClipBridge.dex` validates these in-memory in under 1 ms, syncing captures to the laptop's
+`Temporary Screenshots/` folder in ~842 ms.
+
 ---
 
 ## 3. Optional extra: "Send Clip" manual push (any device, but built for one that fails §2)
@@ -368,6 +399,22 @@ Battery Usage after a day of real use for actual numbers on a device that uses �
 laptop side is unaffected regardless of which tier any device uses, the tray app runs the
 exact same `core/hub.py` daemon that would otherwise run as a bare script, plus a
 near-zero-cost tray icon message loop.
+
+## Adding a New Device (Quick Flow)
+
+With the updated Dashboard & auto-provisioning system, adding a future device is simple:
+
+1. **On the Windows Laptop**:
+   - Open CopyClip Dashboard (click the tray icon or right-click -> "Open dashboard").
+   - Go to the **Settings & Devices** tab.
+   - Click **+ Add New Device**, type the device name (e.g. `pixel9`) and Tailscale IP:5555, then click Save.
+   - Click **Save Configuration**.
+
+2. **On the Android Device**:
+   - Connect the device to your Tailscale network and enable Wireless Debugging / port 5555.
+   - Install `CopyClip.apk`.
+   - On first connect, the laptop automatically sends the cryptographic key and host settings over the secure ADB pipe.
+   - The device UI displays **"Auto-configured from laptop"** with green status, zero typing required.
 
 ## Troubleshooting
 

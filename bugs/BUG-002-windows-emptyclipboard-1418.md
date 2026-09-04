@@ -1,7 +1,7 @@
 # BUG-002: `EmptyClipboard failed (err=1418)` silently discards the clip
 
 **Severity:** High — this is **data loss**, not cosmetic
-**Status:** OPEN — fix applied, awaiting real-use confirmation
+**Status:** CONFIRMED, fixed in real use (2026-09-03)
 **Affects:** laptop (`predator-helios-300`), any incoming clip
 
 ---

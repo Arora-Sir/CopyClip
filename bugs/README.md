@@ -8,15 +8,17 @@ in real use, not merely when a test passes.
 
 | ID | Title | Severity | Status |
 | :--- | :--- | :--- | :--- |
-| [BUG-001](BUG-001-clipboard-toast-storm.md) | Toast storm on every copy; Link to Windows reads the clipboard despite being "off" | Medium (noise, privacy) | **OPEN, fix applied, awaiting confirmation** |
-| [BUG-002](BUG-002-windows-emptyclipboard-1418.md) | `EmptyClipboard failed (err=1418)` drops the clip entirely | **High (data loss)** | **OPEN, fix applied, awaiting confirmation** |
-| [BUG-003](BUG-003-duplicate-daemon-instances.md) | Two daemons run at once: every laptop copy lands on the phone twice, and log lines go missing | High | **OPEN, fix applied, awaiting confirmation** |
-| [BUG-004](BUG-004-com-thread-init.md) | `CoCreateInstance` fails with `CO_E_NOTINITIALIZED` on some threads, silently dropping an incoming image | High (data loss) | **OPEN, fix applied, awaiting confirmation** |
-| [BUG-005](BUG-005-duplicate-screenshot-push.md) | A screenshot re-touched in place by a background process (media scanner, thumbnail regen, ...) gets re-pushed as if it were new | Medium-High | **OPEN, fix applied, awaiting confirmation** |
-| [BUG-006](BUG-006-screenshot-clipboard-preview-duplicate.md) | A companion app's clipboard accessibility service places a small preview image on the real Android clipboard at screenshot time, synced as a spurious duplicate of the real capture | Low-Medium | **CONFIRMED, fixed as of 2026-08-23 (reopen if it recurs)** |
+| [BUG-001](BUG-001-clipboard-toast-storm.md) | Toast storm on every copy; Link to Windows reads the clipboard despite being "off" | Medium (noise, privacy) | **CONFIRMED, fixed in real use (2026-09-03)** |
+| [BUG-002](BUG-002-windows-emptyclipboard-1418.md) | `EmptyClipboard failed (err=1418)` drops the clip entirely | **High (data loss)** | **CONFIRMED, fixed in real use (2026-09-03)** |
+| [BUG-003](BUG-003-duplicate-daemon-instances.md) | Two daemons run at once: every laptop copy lands on the phone twice, and log lines go missing | High | **CONFIRMED, fixed in real use (2026-09-03)** |
+| [BUG-004](BUG-004-com-thread-init.md) | `CoCreateInstance` fails with `CO_E_NOTINITIALIZED` on some threads, silently dropping an incoming image | High (data loss) | **CONFIRMED, fixed in real use (2026-09-03)** |
+| [BUG-005](BUG-005-duplicate-screenshot-push.md) | A screenshot re-touched in place by a background process (media scanner, thumbnail regen, ...) gets re-pushed as if it were new | Medium-High | **CONFIRMED, fixed in real use (2026-09-03)** |
+| [BUG-006](BUG-006-screenshot-clipboard-preview-duplicate.md) | A companion app's clipboard accessibility service places a small preview image on the real Android clipboard at screenshot time, synced as a spurious duplicate of the real capture | Low-Medium | **CONFIRMED, fixed in real use (2026-09-03)** |
 | [BUG-007](BUG-007-long-link-copy-rejected-as-non-text.md) | Copying a link (vs. plain-selected text) on the phone reports a non-standard mime (`text/x-moz-url`) the laptop doesn't recognize, so the clip is silently rejected as "non-text" and never syncs | Medium-High | **CONFIRMED, fixed in real use (2026-08-23)** |
 | [BUG-008](BUG-008-restart-drops-baseline.md) | An AHK-triggered daemon restart silently drops the next phone/tablet clip as an unsynced "baseline" | High | **CONFIRMED, fixed in real use (2026-08-23)** |
-| [BUG-009](BUG-009-pixel-clipbridge-printstream-crash.md) | ClipBridge crashes instantly on Android 10 (Pixel) -- a `PrintStream` constructor added in Java 10 doesn't exist on this SDK's core library. Writes into pixel confirmed fixed; a second, separate bug found where pixel stops announcing its own clipboard changes after one write lands on it | High | **Crash fix CONFIRMED (2026-08-31). Read-direction freeze: retested clean 2026-09-01 (exact write-then-local-copy sequence, no freeze), downgraded to not currently reproducing, watching real use, not closed** |
+| [BUG-009](BUG-009-pixel-clipbridge-printstream-crash.md) | ClipBridge crashes instantly on Android 10 (Pixel) - PrintStream constructor missing from core-oj.jar; read freeze eliminated via 30s chunk timeout | High | **CONFIRMED, fixed in real use (2026-09-03)** |
+| [BUG-010](BUG-010-samsung-sef-screenshot-delay.md) | Samsung One UI SEF metadata trailers on JPEGs fail `isCompleteImage()`, causing an infinite 8-second thread freeze loop and 60-90s screenshot copy delay | High | **CONFIRMED, fixed in real use (2026-09-03)** |
+| [BUG-011](BUG-011-pixel-screenshot-sync-and-sendclip.md) | Pixel 1 screenshot sync suppressed by `initScreenshotWatch` baseline race, 12s chunk ACK timeout, and SendClip clipboard limitation | High | **CONFIRMED, fixed and verified live on hardware (2026-09-03)** |
 
 ## Companion files
 

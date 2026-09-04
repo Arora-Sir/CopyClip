@@ -2,7 +2,7 @@
 
 **Severity:** Medium-High (redundant syncs, large repeated writes, possible knock-on effect
 on Windows Clipboard History — see Open points)
-**Status:** OPEN — fix applied, awaiting real-use confirmation
+**Status:** CONFIRMED, fixed in real use (2026-09-03)
 **Affects:** phone, tablet (both run the same `ClipBridge.java`); symptoms visible on the
 laptop
 

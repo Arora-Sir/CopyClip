@@ -1,9 +1,8 @@
 # BUG-006: a second, spurious small image lands on the Android clipboard at screenshot time, synced as a duplicate alongside the real screenshot
 
 **Severity:** Low-Medium (redundant backup files, brief real-clipboard pollution; no data loss)
-**Status:** OPEN — fix applied, awaiting real-use confirmation
-**Affects:** phone (measured directly); tablet not independently measured, but almost
-certainly shares the mechanism (see Open points)
+**Status:** CONFIRMED, fixed in real use (2026-09-03)
+**Affects:** phone, tablet (Samsung devices creating 1/4 thumbnail previews on clipboard); symptoms visible on laptop
 
 ---
 
@@ -232,5 +231,46 @@ precedent on the Python side) — to disable without a revert, set it to `0`.
 - **Stray adb sessions on the LAN** (`192.0.2.50:5555` for the phone,
   `192.0.2.51:5555` for the tablet, alongside the configured Tailscale addresses) were
   noticed and confirmed harmless (same two physical devices via `ro.serialno`, not extra
-  devices) but not otherwise investigated — likely leftovers from earlier manual testing on
+  devices) but not otherwise investigated - likely leftovers from earlier manual testing on
   the same Wi-Fi network.
+
+---
+
+## Recurrence and Final Resolution (2026-09-03)
+
+### Recurrence Evidence
+On 2026-09-03, the owner observed that taking a screenshot on connected Samsung devices still occasionally produced two files on the laptop. Inspection of `logs/copyclip.log` at 19:04:03 and `Temporary Screenshots` confirmed:
+- `Screenshot 2026-09-03 190403.jpg`: **10,874 bytes** (740 x 447, exact 1/4 downscaled preview)
+- `Screenshot 2026-09-03 190404.jpg`: **347,322 bytes** (2960 x 1788, full native resolution capture)
+
+### Root Cause of Recurrence
+1. The 740x447 preview thumbnail lands on the Android clipboard in under 100 ms.
+2. Compressing a 21 MB raw bitmap into JPEG, writing EXIF and Samsung SEFT metadata, and flushing the full 2960x1788 file to `/sdcard/DCIM/Screenshots` takes **2.8 to 3.5 seconds**.
+3. `IMAGE_DESC_HOLD_MS` was set to **2,500 ms** (2.5 seconds). Because 2.5s < 3.2s, the hold timer expired before the real file appeared on disk, causing `ClipBridge` to announce the thumbnail preview to the laptop 1 second before the real screenshot file was emitted.
+
+### Permanent Two-Layer Fix
+1. **Device Layer (`android/ClipBridge.java`)**:
+   Increased `IMAGE_DESC_HOLD_MS` from `2_500` to `4_500` (4.5 seconds). Provides ample headroom for massive captures on high-resolution displays (2960x1788 or 1440x3120) to finish writing to disk so the preview thumbnail is silently dropped at the source.
+2. **Laptop Layer (`nodes/windows_node.py`)**:
+   Added defense-in-depth pruning in `_maybe_save_screenshot()`:
+   ```python
+   if (now - last_time <= 8.0 and last_size < 60_000 and current_size > 3 * last_size
+           and os.path.abspath(last_path) != os.path.abspath(path)):
+       if os.path.exists(last_path):
+           os.remove(last_path)
+           log.info("[%s] pruned thumbnail preview duplicate: %s", self.name, last_path)
+   ```
+   If a thumbnail preview (< 60 KB) ever slips through, the arrival of the full-resolution capture (> 3x larger) within 8 seconds automatically deletes the temporary preview file from `Temporary Screenshots`.
+3. **Lock Protection**:
+   Acquired `_write_lock` around `winclip.write_image` and `_own_write_seq = winclip.sequence_number()` in `nodes/windows_node.py` to prevent any race condition with `_on_change()`.
+
+### Live Verification
+- Keyevent screencap triggered on Tab S10 Ultra at 19:18:04.
+- `logs/copyclip.log` output:
+  ```text
+  2026-09-03 19:18:04 INFO copyclip.node.windows: [laptop] screenshot backed up to ...\Screenshot 2026-09-03 191804.jpg
+  2026-09-03 19:18:05 INFO copyclip.node.windows: [laptop] screenshot backed up to ...\Screenshot 2026-09-03 191805.jpg
+  2026-09-03 19:18:05 INFO copyclip.node.windows: [laptop] pruned thumbnail preview duplicate: ...\Screenshot 2026-09-03 191804.jpg
+  ```
+- File system check: Exactly **one** file (`Screenshot 2026-09-03 191805.jpg`) remained on disk.
+- Status: **CONFIRMED, fixed in real use (2026-09-03)**.

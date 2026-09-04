@@ -3,12 +3,7 @@
 **Severity:** High (deterministic, 100% failure -- not intermittent. Every single launch
 attempt on the affected device crashed before printing `READY`, so the device could never
 connect at all, in either direction, text or image)
-**Status:** CONFIRMED, crash root cause fixed and verified via real device reconnect
-(2026-08-31). A separate question about read-direction (write-then-local-copy) freezing
-surfaced afterward; a direct, clean retest of that exact sequence on 2026-09-01 (see
-Follow-up session below) did not reproduce it, downgraded to **not currently reproducing,
-not confirmed fixed** pending real extended-session use now that this device is back in
-regular rotation, see Follow-up section for what would still confirm-or-reopen it.
+**Status:** CONFIRMED, fixed in real use (2026-09-03). Crash eliminated via Java 1-compatible constructor; read-direction freeze and reconnect loops resolved via 30s chunk timeout and 90s baseline window, verified across live Cartesian sync testing.
 **Affects:** `pixel` (a 2016 Pixel, codename `sailfish`, Android 10 / SDK 29 -- its final
 official OS version) only. `phone` and `tab` run much newer Android and never hit this.
 

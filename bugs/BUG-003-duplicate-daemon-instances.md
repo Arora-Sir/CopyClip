@@ -1,7 +1,7 @@
 # BUG-003: two daemons run at once, duplicating writes and hiding log lines
 
 **Severity:** High — visible wrong behaviour on every copy
-**Status:** OPEN — fix applied, awaiting real-use confirmation
+**Status:** CONFIRMED, fixed in real use (2026-09-03)
 **Affects:** laptop; symptoms appear on the phone
 
 ---

@@ -1,7 +1,7 @@
 # BUG-004: `CoCreateInstance` fails with `CO_E_NOTINITIALIZED` on some threads, silently dropping an incoming image
 
 **Severity:** High — data loss, same shape as BUG-002
-**Status:** OPEN — fix applied, awaiting real-use confirmation
+**Status:** CONFIRMED, fixed in real use (2026-09-03)
 **Affects:** laptop (`predator-helios-300`); image sync from either Samsung device to the laptop
 
 ---

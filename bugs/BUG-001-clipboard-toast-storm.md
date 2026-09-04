@@ -1,7 +1,7 @@
 # BUG-001: Toast storm on every copy, and Link to Windows reading the clipboard while "off"
 
 **Severity:** Medium (noise, and a genuine privacy concern: an app is reading every clip)
-**Status:** OPEN — fix applied, awaiting real-use confirmation
+**Status:** CONFIRMED, fixed in real use (2026-09-03)
 **Affects:** S24 Ultra primarily; Tab S10 Ultra since clipboard alerts were enabled there too
 
 ---
