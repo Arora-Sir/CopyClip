@@ -19,6 +19,7 @@ in real use, not merely when a test passes.
 | [BUG-009](BUG-009-pixel-clipbridge-printstream-crash.md) | ClipBridge crashes instantly on Android 10 (Pixel) - PrintStream constructor missing from core-oj.jar; read freeze eliminated via 30s chunk timeout | High | **CONFIRMED, fixed in real use (2026-09-03)** |
 | [BUG-010](BUG-010-samsung-sef-screenshot-delay.md) | Samsung One UI SEF metadata trailers on JPEGs fail `isCompleteImage()`, causing an infinite 8-second thread freeze loop and 60-90s screenshot copy delay | High | **CONFIRMED, fixed in real use (2026-09-03)** |
 | [BUG-011](BUG-011-pixel-screenshot-sync-and-sendclip.md) | Pixel 1 screenshot sync suppressed by `initScreenshotWatch` baseline race, 12s chunk ACK timeout, and SendClip clipboard limitation | High | **CONFIRMED, fixed and verified live on hardware (2026-09-03)** |
+| [BUG-012](BUG-012-screenshot-traversal-storm-and-battery-drain.md) | High idle CPU and flash wear: 2,912 File.listFiles() stats/sec screenshot traversal storm, keyguard polling loop, and companion app 4s config write loop | High (battery, CPU, flash wear) | **CONFIRMED, fixed and verified live on hardware (2026-09-04)** |
 
 ## Companion files
 

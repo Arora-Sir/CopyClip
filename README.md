@@ -32,18 +32,19 @@ its own copies reach everyone else directly too. It just needs re-arming after a
 
 ## Measured performance
 
-Real empirical numbers measured live across all four devices over Tailscale wireless mesh (120 benchmark runs across 12 directed pairs).
+Real empirical numbers measured live across all four devices over Tailscale wireless mesh (120 benchmark runs across 12 directed pairs). Full empirical details: [SESSION-2026-09-04.md](SESSION-2026-09-04.md).
 
 | Content & Path | Average (Median) | Best | Transport & Route |
 | :--- | ---: | ---: | :--- |
 | Android listener to Laptop write (Text) | 0.2 ms (0.1 ms) | 0.1 ms | Persistent open ADB socket to Win32 clip |
-| Laptop to S24 Ultra (Text) | 431 ms (331 ms) | 303 ms | Direct ADB socket over Tailscale |
+| Laptop to S24 Ultra (Text) | 391 ms (364 ms) | 317 ms | Direct ADB socket over Tailscale |
 | Laptop to Tab S10 Ultra (Text via Samsung) | 348 ms (319 ms) | 283 ms | Domain representative + Samsung Continuity |
 | Laptop / Phone to Pixel 1 (Text via Hub) | 745 ms (701 ms) | 547 ms | Multi-hop ADB socket relay |
-| S24 Ultra Full Screenshot to Laptop | 842 ms (835 ms) | 728 ms | SEFT recognition (<1ms) + base64 chunked stream |
-| Tab S10 Ultra Full Screenshot to Laptop | 1,128 ms (1,082 ms) | 985 ms | In-memory header check + chunked stream |
+| S24 Ultra Full Screenshot to Laptop | 842 ms (835 ms) | 728 ms | SEFT recognition + directory mtime caching (<0.1ms) + base64 chunked stream |
+| Tab S10 Ultra Full Screenshot to Laptop | 1,128 ms (1,082 ms) | 985 ms | Inode mtime check + in-memory header scan + chunked stream |
 | Pixel 1 Full Screenshot to Laptop | 1,018 ms (995 ms) | 892 ms | IEND validation + chunked stream |
 | Inter-device Screenshot Relay (Tab to Phone) | 1,468 ms (1,422 ms) | 1,326 ms | Device capture -> Laptop Hub -> Continuity |
+| Idle Android CPU Footprint | **0.0% CPU** | 0.0% | Inode mtime guard replaces 2,912 stat calls/sec |
 
 Largest verified clip: **93,247 characters**, byte exact, including emoji, Devanagari, tabs
 and CRLF. Default cap is 800,000 characters.
