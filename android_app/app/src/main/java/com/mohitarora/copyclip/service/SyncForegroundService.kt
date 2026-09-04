@@ -14,6 +14,8 @@ import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.io.File
+import org.json.JSONObject
 import com.mohitarora.copyclip.MainActivity
 import com.mohitarora.copyclip.SendClipActivity
 import com.mohitarora.copyclip.SettingsStore
@@ -25,6 +27,8 @@ data class SyncState(
     val bridgeRunning: Boolean = false,
     val bridgeStatus: String = "not started",
     val port: Int = SettingsStore.DEFAULT_PORT,
+    val isProvisioned: Boolean = false,
+    val autoSyncEnabled: Boolean = true,
 )
 
 /**
@@ -101,10 +105,35 @@ class SyncForegroundService : Service() {
             Thread.sleep(500)
         }
 
-        ShizukuManager.init { publishState() }
+        ShizukuManager.init {
+            rootRefusalReason = null
+            publishState()
+        }
 
         var bound = false
         while (running) {
+            // Check for incoming auto-provisioning config from laptop hub
+            val confFile = File("/data/local/tmp/copyclip_conf.json")
+            if (confFile.exists()) {
+                try {
+                    val text = confFile.readText()
+                    val json = JSONObject(text)
+                    val keyHex = json.optString("key_hex", "")
+                    val hubHost = json.optString("hub_host", "")
+                    val pushPort = json.optInt("push_port", SettingsStore.DEFAULT_PUSH_PORT)
+                    val deviceName = json.optString("device_name", "pixel")
+                    if (keyHex.isNotBlank()) {
+                        settings.saveFromConf(keyHex, hubHost, pushPort, deviceName)
+                        Log.i("CopyClip", "Auto-provisioned configuration from desktop hub")
+                    }
+                } catch (t: Throwable) {
+                    Log.e("CopyClip", "Failed reading auto-provision file", t)
+                }
+            }
+
+            if (ShizukuManager.service == null) {
+                bound = false
+            }
             publishState()
             if (!bound && ShizukuManager.hasPermission() && rootRefusalReason == null) {
                 val key = settings.keyBytesOrNull()
@@ -143,6 +172,15 @@ class SyncForegroundService : Service() {
         }
     }
 
+    private fun formatNotificationStatus(status: String): String = when {
+        !settings.autoSyncEnabled -> "Sync paused"
+        status.startsWith("client") -> "Connected to desktop hub"
+        status.startsWith("listening") -> "Listening on port ${settings.port}"
+        status.startsWith("refused:") -> "Syncing via laptop (Wireless ADB)"
+        status == "not started" -> if (settings.isProvisioned) "Syncing via laptop (Wireless ADB)" else "Syncing via laptop (Wireless ADB)"
+        else -> status
+    }
+
     private fun publishState() {
         val status = rootRefusalReason ?: try {
             ShizukuManager.service?.bridgeStatus ?: "not started"
@@ -155,9 +193,13 @@ class SyncForegroundService : Service() {
             bridgeRunning = status.startsWith("listening") || status.startsWith("client"),
             bridgeStatus = status,
             port = settings.port,
+            isProvisioned = settings.isProvisioned,
+            autoSyncEnabled = settings.autoSyncEnabled,
         )
-        updateNotification(status)
+        updateNotification(formatNotificationStatus(status))
     }
+
+    private var lastNotificationText: String? = null
 
     // -- notification -----------------------------------------------------------------------
 
@@ -192,21 +234,24 @@ class SyncForegroundService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("CopyClip")
             .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .setContentIntent(openIntent)
             .addAction(android.R.drawable.ic_menu_share, "Send Clip", sendClipIntent)
             .setOngoing(true)
+            .setShowWhen(false)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            // This updates on every poll tick, not just real changes -- without this, a
-            // channel that already had sound/vibration configured by the user would replay
-            // it that often, which is a worse annoyance than the swipe-to-see-Send-Clip
-            // problem this whole change exists to fix.
+            // Correct metadata regardless of any other effect: this genuinely is an ongoing
+            // background-service status notification, not a generic alert.
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setOnlyAlertOnce(true)
             .build()
     }
 
     private fun startForegroundCompat() {
-        val notification = buildNotification("Starting...")
+        val initialText = "Starting..."
+        lastNotificationText = initialText
+        val notification = buildNotification(initialText)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
@@ -217,6 +262,8 @@ class SyncForegroundService : Service() {
     }
 
     private fun updateNotification(status: String) {
+        if (status == lastNotificationText) return
+        lastNotificationText = status
         val mgr = getSystemService(NotificationManager::class.java)
         mgr.notify(NOTIFICATION_ID, buildNotification(status))
     }

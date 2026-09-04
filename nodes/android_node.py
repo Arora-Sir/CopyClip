@@ -20,6 +20,8 @@ rationale.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import queue
 import threading
@@ -482,10 +484,11 @@ class AndroidNode(ClipboardNode):
                 # the whole (pointless) transfer finished sending, instead of within
                 # ack_timeout_s like every other write.
                 if idx > 0 and idx % ACK_WINDOW == 0:
-                    if not self._chunk_ack_event.wait(timeout=self.ack_timeout_s):
+                    chunk_timeout = max(self.ack_timeout_s, 30.0)
+                    if not self._chunk_ack_event.wait(timeout=chunk_timeout):
                         log.warning(
                             "[%s] no chunk ACK within %.1fs at chunk %d/%d; "
-                            "treating channel as dead", self.name, self.ack_timeout_s,
+                            "treating channel as dead", self.name, chunk_timeout,
                             idx, len(chunks))
                         transport.mark_dead()
                         self._ack_verb = None
@@ -497,11 +500,12 @@ class AndroidNode(ClipboardNode):
             self._ack_verb = None
             return WriteResult.FAILED
 
-        confirmed = self._ack_event.wait(timeout=self.ack_timeout_s)
+        final_timeout = max(self.ack_timeout_s, 30.0)
+        confirmed = self._ack_event.wait(timeout=final_timeout)
         self._ack_verb = None
         if not confirmed:
             log.warning("[%s] no final ACK/DEFER for image SET within %.1fs; "
-                        "treating channel as dead", self.name, self.ack_timeout_s)
+                        "treating channel as dead", self.name, final_timeout)
             transport.mark_dead()
             return WriteResult.FAILED
 
@@ -557,3 +561,23 @@ class AndroidNode(ClipboardNode):
             transport.send_line("DESC")
         except TransportError:
             pass
+
+    def send_conf(self, key_hex: str, hub_host: str, push_port: int, device_name: str) -> None:
+        """Pushes auto-provisioning configuration to the device over the secure transport."""
+        with self._lock:
+            transport = self._transport
+        if transport is None:
+            return
+        try:
+            payload = json.dumps({
+                "key_hex": key_hex,
+                "hub_host": hub_host,
+                "push_port": push_port,
+                "device_name": device_name,
+            })
+            b64 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+            transport.send_line(f"CONF {b64}")
+            log.debug("[%s] sent CONF auto-provisioning payload", self.name)
+        except Exception as e:
+            log.warning("[%s] failed to send CONF: %s", self.name, e)
+

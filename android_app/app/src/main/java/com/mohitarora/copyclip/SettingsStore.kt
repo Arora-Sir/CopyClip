@@ -39,6 +39,24 @@ class SettingsStore(context: Context) {
         get() = prefs.getString("device_name", "pixel") ?: "pixel"
         set(value) = prefs.edit().putString("device_name", value.trim()).apply()
 
+    var isProvisioned: Boolean
+        get() = prefs.getBoolean("is_provisioned", false) || hmacKeyHex.length >= 32
+        set(value) = prefs.edit().putBoolean("is_provisioned", value).apply()
+
+    var autoSyncEnabled: Boolean
+        get() = prefs.getBoolean("auto_sync_enabled", true)
+        set(value) = prefs.edit().putBoolean("auto_sync_enabled", value).apply()
+
+    fun saveFromConf(keyHex: String, host: String, pushPort: Int, name: String) {
+        prefs.edit()
+            .putString("hmac_key_hex", keyHex.trim())
+            .putString("hub_host", host.trim())
+            .putInt("hub_push_port", pushPort)
+            .putString("device_name", name.trim())
+            .putBoolean("is_provisioned", true)
+            .apply()
+    }
+
     /**
      * The laptop (copyclip.py's make_transport_factory / termux/copyclip_node.py) reads
      * copyclip.key's raw file bytes as-is for HMAC -- it never hex-decodes them, even though

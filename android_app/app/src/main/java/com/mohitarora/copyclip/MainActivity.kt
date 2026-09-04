@@ -8,6 +8,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -40,27 +41,14 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             CopyClipTheme {
-                var keyText by remember { mutableStateOf(settings.hmacKeyHex) }
-                var portText by remember { mutableStateOf(settings.port.toString()) }
-                var hubHostText by remember { mutableStateOf(settings.hubHost) }
-                var deviceNameText by remember { mutableStateOf(settings.deviceName) }
                 val state by SyncForegroundService.state.collectAsState()
 
                 MainScreen(
                     state = state,
-                    keyText = keyText,
-                    portText = portText,
-                    hubHostText = hubHostText,
-                    deviceNameText = deviceNameText,
-                    onKeyChange = { keyText = it },
-                    onPortChange = { portText = it },
-                    onHubHostChange = { hubHostText = it },
-                    onDeviceNameChange = { deviceNameText = it },
-                    onSave = {
-                        settings.hmacKeyHex = keyText
-                        portText.toIntOrNull()?.let { settings.port = it }
-                        settings.hubHost = hubHostText
-                        deviceNameText.takeIf { it.isNotBlank() }?.let { settings.deviceName = it }
+                    deviceName = settings.deviceName,
+                    hubHost = settings.hubHost,
+                    onToggleAutoSync = {
+                        settings.autoSyncEnabled = it
                         startForegroundServiceCompat()
                     },
                     onGrantShizuku = { ShizukuManager.requestPermission() },

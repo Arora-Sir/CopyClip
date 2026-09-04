@@ -21,9 +21,8 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -40,30 +39,29 @@ import com.mohitarora.copyclip.ui.theme.StatusWaiting
 
 private sealed class Status(val label: String, val color: @Composable () -> Color) {
     object Connected : Status("Connected", { StatusConnected })
-    object Waiting : Status("Waiting for a device", { StatusWaiting })
+    object Waiting : Status("Waiting for hub", { StatusWaiting })
+    object WirelessAdb : Status("Wireless ADB active", { StatusConnected })
+    object ManualOnly : Status("Manual sync ready", { StatusWaiting })
+    object Paused : Status("Sync paused", { StatusWaiting })
     object NotReady : Status("Not set up", { StatusError })
 }
 
 private fun statusOf(state: SyncState): Status = when {
-    !state.shizukuAlive || !state.permissionGranted -> Status.NotReady
+    !state.autoSyncEnabled -> Status.Paused
     state.bridgeStatus.startsWith("client") -> Status.Connected
-    state.bridgeRunning -> Status.Waiting
-    else -> Status.NotReady
+    state.bridgeRunning && state.bridgeStatus != "not started" && !state.bridgeStatus.startsWith("refused:") -> Status.Waiting
+    state.bridgeStatus == "not started" || state.bridgeStatus.startsWith("refused:") -> Status.WirelessAdb
+    !state.shizukuAlive || !state.permissionGranted -> Status.NotReady
+    else -> Status.WirelessAdb
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     state: SyncState,
-    keyText: String,
-    portText: String,
-    hubHostText: String,
-    deviceNameText: String,
-    onKeyChange: (String) -> Unit,
-    onPortChange: (String) -> Unit,
-    onHubHostChange: (String) -> Unit,
-    onDeviceNameChange: (String) -> Unit,
-    onSave: () -> Unit,
+    deviceName: String,
+    hubHost: String,
+    onToggleAutoSync: (Boolean) -> Unit,
     onGrantShizuku: () -> Unit,
     onSendClip: () -> Unit,
 ) {
@@ -87,59 +85,81 @@ fun MainScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Spacer(Modifier.height(4.dp))
-            DeviceStatusCard(state)
+            DeviceStatusCard(state, deviceName, hubHost, onToggleAutoSync)
             ShizukuCard(state, onGrantShizuku)
             SendClipCard(onSendClip)
-            SettingsCard(
-                keyText, portText, hubHostText, deviceNameText,
-                onKeyChange, onPortChange, onHubHostChange, onDeviceNameChange, onSave,
-            )
             Spacer(Modifier.height(24.dp))
         }
     }
 }
 
 @Composable
-private fun DeviceStatusCard(state: SyncState) {
+private fun DeviceStatusCard(
+    state: SyncState,
+    deviceName: String,
+    hubHost: String,
+    onToggleAutoSync: (Boolean) -> Unit,
+) {
     val status = statusOf(state)
     Card(
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(
-            modifier = Modifier.padding(20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
-                contentAlignment = Alignment.Center,
+        Column(modifier = Modifier.padding(20.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
                     modifier = Modifier
-                        .size(16.dp)
-                        .background(status.color(), CircleShape),
+                        .size(48.dp)
+                        .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .background(status.color(), CircleShape),
+                    )
+                }
+                Column(
+                    modifier = Modifier
+                        .padding(start = 16.dp)
+                        .weight(1f)
+                ) {
+                    Text(
+                        text = "This device (${deviceName.ifBlank { "pixel" }})",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = status.label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = status.color(),
+                    )
+                }
+                Switch(
+                    checked = state.autoSyncEnabled,
+                    onCheckedChange = onToggleAutoSync,
                 )
             }
-            Column(modifier = Modifier.padding(start = 16.dp)) {
-                Text(
-                    text = "This device",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = status.label,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = status.color(),
-                )
-                Text(
-                    text = "port ${state.port} · ${state.bridgeStatus}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+
+            Spacer(Modifier.height(10.dp))
+
+            Text(
+                text = when {
+                    !state.autoSyncEnabled ->
+                        "Background clipboard synchronization is paused. Tap Send Clip below for manual sync."
+                    state.bridgeStatus.startsWith("client") ->
+                        "Connected to laptop hub (${hubHost.ifBlank { "100.64.0.1" }}) · Auto-sync active"
+                    state.bridgeStatus == "not started" || state.bridgeStatus.startsWith("refused:") ->
+                        "Connected to laptop hub (Wireless ADB on port 5555) · Auto-sync active"
+                    else -> "port ${state.port} · ${state.bridgeStatus}"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -201,10 +221,7 @@ private fun SendClipCard(onSendClip: () -> Unit) {
             )
             Text(
                 "Manual one-tap push of this device's current clipboard to the laptop " +
-                    "and the rest of the mesh. Works even when automatic background sync " +
-                    "can't (e.g. this device can't hold Shizuku without root) -- also " +
-                    "available from the persistent notification. Requires the hub " +
-                    "address below to be set.",
+                    "and the rest of the mesh. Works instantly from here or the persistent notification.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
@@ -216,70 +233,3 @@ private fun SendClipCard(onSendClip: () -> Unit) {
     }
 }
 
-@Composable
-private fun SettingsCard(
-    keyText: String,
-    portText: String,
-    hubHostText: String,
-    deviceNameText: String,
-    onKeyChange: (String) -> Unit,
-    onPortChange: (String) -> Unit,
-    onHubHostChange: (String) -> Unit,
-    onDeviceNameChange: (String) -> Unit,
-    onSave: () -> Unit,
-) {
-    Card(
-        shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(modifier = Modifier.padding(20.dp)) {
-            Text(
-                "Pairing",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                "Paste the same key from the laptop's copyclip.key file.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
-            )
-            OutlinedTextField(
-                value = keyText,
-                onValueChange = onKeyChange,
-                label = { Text("Shared key (hex)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = portText,
-                onValueChange = onPortChange,
-                label = { Text("Port (this device listens on)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = hubHostText,
-                onValueChange = onHubHostChange,
-                label = { Text("Hub address (laptop Tailscale IP, for Send Clip)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = deviceNameText,
-                onValueChange = onDeviceNameChange,
-                label = { Text("Device name (must match config.json)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(16.dp))
-            OutlinedButton(onClick = onSave, modifier = Modifier.fillMaxWidth()) {
-                Text("Save")
-            }
-        }
-    }
-}
