@@ -49,18 +49,24 @@ WM_TIMER = 0x0113
 WM_NULL = 0x0000
 WM_APP = 0x8000
 WM_CONTEXTMENU = 0x007B
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
+NIN_SELECT = 0x0400
+NIN_KEYSELECT = 0x0401
 WMAPP_TRAY = WM_APP + 1
 
 NIM_ADD, NIM_MODIFY, NIM_DELETE, NIM_SETVERSION = 0, 1, 2, 4
 NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x1, 0x2, 0x4
 NOTIFYICON_VERSION_4 = 4
 
-MF_STRING, MF_GRAYED, MF_SEPARATOR = 0x0, 0x1, 0x800
+MF_STRING, MF_GRAYED, MF_SEPARATOR, MF_POPUP = 0x0, 0x1, 0x800, 0x0010
 TPM_RIGHTBUTTON = 0x0002
 
 IDM_PAUSE, IDM_CONFIG, IDM_LOGS, IDM_QUIT, IDM_DASHBOARD = 1001, 1002, 1003, 1004, 1005
-IDM_DEVICE_BASE = 2000  # disabled, informational device-status labels start here
+IDM_DEVICE_BASE = 2000  # informational device-status labels start here
+IDM_DEVICE_PAUSE_BASE = 3000  # per-device pause/resume actions start here
 
 IDI_APPLICATION = 32512
 IMAGE_ICON = 1
@@ -98,7 +104,7 @@ user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UIN
                               ctypes.c_int, ctypes.c_int, wintypes.UINT]
 user32.LoadImageW.restype = wintypes.HANDLE
 user32.CreatePopupMenu.restype = wintypes.HMENU
-user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_uint, wintypes.LPCWSTR]
+user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
 user32.AppendMenuW.restype = wintypes.BOOL
 user32.DestroyMenu.argtypes = [wintypes.HMENU]
 user32.DestroyMenu.restype = wintypes.BOOL
@@ -123,6 +129,27 @@ shell32.Shell_NotifyIconW.restype = wintypes.BOOL
 # that was registered before it came back. Re-adding on this broadcast is the documented
 # fix (Microsoft's own NotificationIcon.cpp sample does the same thing).
 WM_TASKBARCREATED = user32.RegisterWindowMessageW("TaskbarCreated")
+
+
+def _enable_dark_mode(hwnd: int) -> None:
+    """Enables Windows 10/11 dark mode for the window and its native popup menus."""
+    try:
+        dwmapi = ctypes.WinDLL("dwmapi")
+        val = ctypes.c_int(1)
+        for attr in (20, 19):
+            if dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)) == 0:
+                break
+    except Exception:
+        pass
+
+    try:
+        uxtheme = ctypes.WinDLL("uxtheme")
+        set_app_mode = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int)((135, uxtheme))
+        set_app_mode(2)  # ForceDark
+        flush_menu = ctypes.WINFUNCTYPE(None)((136, uxtheme))
+        flush_menu()
+    except Exception:
+        pass
 
 
 class TrayApp:
@@ -150,6 +177,7 @@ class TrayApp:
         if not self._hwnd:
             raise OSError(f"CreateWindowExW failed (err={ctypes.get_last_error()})")
 
+        _enable_dark_mode(self._hwnd)
         self._add_icon()
         user32.SetTimer(self._hwnd, 1, 5000, None)
 
@@ -193,7 +221,7 @@ class TrayApp:
 
     def _set_tip(self) -> None:
         devices = self._device_status()
-        n_up = sum(1 for s in devices.values() if s["available"])
+        n_up = sum(1 for s in devices.values() if s["available"] and not s.get("paused"))
         state = "paused" if self.hub.paused else f"{n_up}/{len(devices)} connected"
         self._nid.szTip = f"CopyClip: {state}"
 
@@ -210,12 +238,19 @@ class TrayApp:
         pause_label = "Resume sync" if self.hub.paused else "Pause sync"
         user32.AppendMenuW(menu, MF_STRING, IDM_PAUSE, pause_label)
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+
         for i, (name, s) in enumerate(self._device_status().items()):
             state = "connected" if s["available"] else "unreachable"
             if s.get("locked"):
                 state += ", locked"
-            user32.AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_DEVICE_BASE + i,
-                              f"{name}: {state}")
+            if s.get("paused"):
+                state += " (paused)"
+
+            sub = user32.CreatePopupMenu()
+            p_label = "Resume sync" if s.get("paused") else "Pause sync"
+            user32.AppendMenuW(sub, MF_STRING, IDM_DEVICE_PAUSE_BASE + i, p_label)
+            user32.AppendMenuW(menu, MF_POPUP, sub, f"{name}: {state}")
+
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
         user32.AppendMenuW(menu, MF_STRING, IDM_CONFIG, "Open config")
         user32.AppendMenuW(menu, MF_STRING, IDM_LOGS, "View logs")
@@ -237,15 +272,26 @@ class TrayApp:
     def _handle_command(self, cmd: int) -> None:
         if cmd == IDM_DASHBOARD:
             import dashboard
-            dashboard.open_dashboard(self.hub)
+            dashboard.open_dashboard(self.hub, self.cfg)
         elif cmd == IDM_QUIT:
             user32.DestroyWindow(self._hwnd)
         elif cmd == IDM_PAUSE:
             self.hub.paused = not self.hub.paused
             log.info("sync %s from tray menu", "paused" if self.hub.paused else "resumed")
             self._refresh_tip()
+        elif IDM_DEVICE_PAUSE_BASE <= cmd < IDM_DEVICE_PAUSE_BASE + 100:
+            idx = cmd - IDM_DEVICE_PAUSE_BASE
+            devices = list(self._device_status().keys())
+            if idx < len(devices):
+                dev_name = devices[idx]
+                if self.hub.is_device_paused(dev_name):
+                    self.hub.resume_device(dev_name)
+                else:
+                    self.hub.pause_device(dev_name)
+                self._refresh_tip()
         elif cmd == IDM_CONFIG:
-            os.startfile(os.path.join(HERE, "config.json"))
+            import dashboard
+            dashboard.open_dashboard(self.hub, self.cfg, initial_tab=1)
         elif cmd == IDM_LOGS:
             os.startfile(os.path.join(HERE, "logs", "copyclip.log"))
 
@@ -255,8 +301,11 @@ class TrayApp:
         if msg == WM_TASKBARCREATED:
             self._add_icon()
         elif msg == WMAPP_TRAY:
-            if (lparam & 0xFFFF) in (WM_RBUTTONUP, WM_CONTEXTMENU):
+            lp = lparam & 0xFFFF
+            if lp in (WM_RBUTTONUP, WM_CONTEXTMENU):
                 self._show_menu()
+            elif lp in (WM_LBUTTONUP, WM_LBUTTONDBLCLK, NIN_SELECT, NIN_KEYSELECT):
+                self._handle_command(IDM_DASHBOARD)
         elif msg == WM_TIMER:
             self._refresh_tip()
         elif msg == WM_COMMAND:
@@ -318,9 +367,9 @@ def main() -> int:
     guard = SingleInstance(os.path.join(HERE, cfg["state_dir"], "copyclip.pid"))
     try:
         guard.acquire(replace=args.replace)
-    except AlreadyRunning as exc:
-        log.error("%s", exc)
-        return 2
+    except AlreadyRunning:
+        log.debug("CopyClip instance is already active; yielding cleanly.")
+        return 0
 
     try:
         register_autostart()

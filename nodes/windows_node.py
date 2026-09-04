@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from datetime import datetime
 
 import winclip
@@ -33,35 +35,36 @@ _IMAGE_EXTENSIONS = {
 class WindowsNode(ClipboardNode):
     def __init__(self, name: str = "laptop", *, screenshot_dir: str | None = None,
                  screenshot_include_devices: bool = True,
+                 screenshot_device_subfolders: bool = True,
+                 device_screenshot_paths: dict[str, str] | None = None,
                  exclude_synced_images_from_history: bool = True) -> None:
         super().__init__(name)
         self._watcher: winclip.ClipboardWatcher | None = None
         self._running = False
-        # Sequence number stamped by our own last successful write. write_image() always
-        # sets both CF_DIBV5 and (when available) a pass-through format in one cycle, but
-        # the encoder is deterministic (winimage.png_from_bgra), so a read-back of our own
-        # write always matches what we sent -- this guards the ClipboardWatcher callback
-        # against re-emitting our own write as if it were a new copy from the user, exactly
-        # as ClipBridge.java's ownWriteStamp already does for the Android side.
+        self._write_lock = threading.Lock()
         self._own_write_seq: int | None = None
-        # Stopgap for a Windows 11 25H2 Snipping Tool bug (see ARCHITECTURE.md's "Two
-        # entries in Windows Clipboard History" note): with Windows' own screenshot
-        # auto-save turned off to fix that bug, this replicates the local file save CopyClip
-        # itself. Empty/None disables it entirely.
+        self._last_saved_screenshot: tuple[str, int, float, str | None] | None = None
         self._screenshot_dir = screenshot_dir or None
         self._screenshot_include_devices = screenshot_include_devices
-        # Trade-off, deliberately made config-reversible (bugs/BUG-005's Open points): a
-        # device-synced image is excluded from Windows Clipboard History so it can't evict
-        # the user's existing entries, at the cost of the synced image itself never showing
-        # up in the Win+V list (Ctrl+V still pastes it correctly either way).
+        self._screenshot_device_subfolders = screenshot_device_subfolders
+        self._device_screenshot_paths = dict(device_screenshot_paths or {})
         self._exclude_synced_images_from_history = exclude_synced_images_from_history
-        # Separate from the hub's own RecentClips (core/hub.py) -- different concern (local
-        # file dedup, not sync-delivery dedup), different TTL need. 20s comfortably spans
-        # both observed causes of a duplicate save: Windows' own clipboard-changed
-        # notification firing twice ~1s apart for one Win+Shift+S even with Snipping Tool's
-        # "automatically save" setting off, and the own-write echo race below (near-instant)
-        # -- without blocking a deliberately re-taken identical screenshot minutes later.
         self._screenshot_dedup = RecentClips(ttl=20.0)
+
+    def update_config(self, *, screenshot_dir: str | None = None,
+                      screenshot_include_devices: bool = True,
+                      screenshot_device_subfolders: bool = True,
+                      device_screenshot_paths: dict[str, str] | None = None,
+                      exclude_synced_images_from_history: bool = True) -> None:
+        """Hot-reloads screenshot directories and options at runtime without restart."""
+        self._screenshot_dir = screenshot_dir or None
+        self._screenshot_include_devices = screenshot_include_devices
+        self._screenshot_device_subfolders = screenshot_device_subfolders
+        self._device_screenshot_paths = dict(device_screenshot_paths or {})
+        self._exclude_synced_images_from_history = exclude_synced_images_from_history
+        log.info("[%s] runtime configuration updated (dir=%s, subfolders=%s, custom=%s)",
+                 self.name, self._screenshot_dir, self._screenshot_device_subfolders,
+                 list(self._device_screenshot_paths.keys()))
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -117,10 +120,11 @@ class WindowsNode(ClipboardNode):
         return ClipPayload(mime=mime, data=data, origin=self.name)
 
     def _on_change(self) -> None:
-        if self._own_write_seq is not None:
-            seq, self._own_write_seq = self._own_write_seq, None
-            if winclip.sequence_number() == seq:
-                return  # our own image write echoing back through the same watcher
+        with self._write_lock:
+            if self._own_write_seq is not None:
+                seq, self._own_write_seq = self._own_write_seq, None
+                if winclip.sequence_number() == seq:
+                    return  # our own image write echoing back through the same watcher
         payload = self._read()
         if payload is not None and payload.size:
             if payload.is_image:
@@ -149,17 +153,43 @@ class WindowsNode(ClipboardNode):
             # _own_write_seq below is stamped). Either way, one screenshot = one file.
             return
         try:
-            os.makedirs(self._screenshot_dir, exist_ok=True)
+            custom_path = self._device_screenshot_paths.get(payload.origin, "").strip() if payload.origin else ""
+            if custom_path:
+                target_dir = custom_path
+            elif self._screenshot_device_subfolders and payload.origin:
+                target_dir = os.path.join(self._screenshot_dir, payload.origin)
+            else:
+                target_dir = self._screenshot_dir
+
+            os.makedirs(target_dir, exist_ok=True)
             ext = _IMAGE_EXTENSIONS.get(payload.mime, ".png")
             stem = datetime.now().strftime("Screenshot %Y-%m-%d %H%M%S")
-            path = os.path.join(self._screenshot_dir, stem + ext)
+            path = os.path.join(target_dir, stem + ext)
             n = 2
             while os.path.exists(path):
-                path = os.path.join(self._screenshot_dir, f"{stem} ({n}){ext}")
+                path = os.path.join(target_dir, f"{stem} ({n}){ext}")
                 n += 1
             with open(path, "wb") as fh:
                 fh.write(payload.data)
             log.info("[%s] screenshot backed up to %s", self.name, path)
+
+            # Defense-in-depth: if an earlier saved screenshot within the last 8 seconds was a
+            # tiny thumbnail preview (< 60 KB) and this new image is a full-resolution capture
+            # (> 3x larger), clean up the preview file so duplicate thumbnails do not linger.
+            now = time.time()
+            current_size = len(payload.data)
+            if self._last_saved_screenshot is not None:
+                last_path, last_size, last_time, last_origin = self._last_saved_screenshot
+                if (now - last_time <= 8.0 and last_size < 60_000 and current_size > 3 * last_size
+                        and os.path.abspath(last_path) != os.path.abspath(path)):
+                    try:
+                        if os.path.exists(last_path):
+                            os.remove(last_path)
+                            log.info("[%s] pruned thumbnail preview duplicate: %s", self.name, last_path)
+                    except Exception as exc:
+                        log.debug("[%s] thumbnail prune skipped: %s", self.name, exc)
+
+            self._last_saved_screenshot = (path, current_size, now, payload.origin)
         except Exception:
             log.warning("[%s] screenshot backup failed", self.name, exc_info=True)
 
@@ -168,13 +198,14 @@ class WindowsNode(ClipboardNode):
             if self._screenshot_include_devices:
                 self._maybe_save_screenshot(payload)
             try:
-                winclip.write_image(
-                    payload.data, payload.mime,
-                    exclude_from_history=self._exclude_synced_images_from_history)
-                # Own-write suppression: winimage's PNG encoder is deterministic, so a
-                # read-back of our own write always matches what we just sent -- there is
-                # nothing new to report when the watcher fires for this exact write.
-                self._own_write_seq = winclip.sequence_number()
+                with self._write_lock:
+                    winclip.write_image(
+                        payload.data, payload.mime,
+                        exclude_from_history=self._exclude_synced_images_from_history)
+                    # Own-write suppression: winimage's PNG encoder is deterministic, so a
+                    # read-back of our own write always matches what we just sent -- there is
+                    # nothing new to report when the watcher fires for this exact write.
+                    self._own_write_seq = winclip.sequence_number()
                 return WriteResult.OK
             except winimage.ImageDecodeError as exc:
                 log.warning("[%s] image write rejected (undecodable): %s", self.name, exc)
@@ -187,7 +218,8 @@ class WindowsNode(ClipboardNode):
         if text is None:
             return WriteResult.REJECTED
         try:
-            winclip.write_text(text)
+            with self._write_lock:
+                winclip.write_text(text)
             return WriteResult.OK
         except Exception:
             log.exception("[%s] write failed", self.name)

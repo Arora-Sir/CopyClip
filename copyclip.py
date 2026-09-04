@@ -61,6 +61,7 @@ DEFAULT_CONFIG = {
 
     "screenshot_backup_dir": "",
     "screenshot_backup_include_devices": True,
+    "screenshot_device_subfolders": True,
     "screenshot_exclude_from_history": True,
 
     "push_port": 8387,
@@ -166,16 +167,31 @@ def build_hub(cfg: dict) -> Hub:
     laptop = WindowsNode(
         "laptop",
         screenshot_dir=cfg.get("screenshot_backup_dir") or None,
-        screenshot_include_devices=cfg["screenshot_backup_include_devices"],
-        exclude_synced_images_from_history=cfg["screenshot_exclude_from_history"],
+        screenshot_include_devices=cfg.get("screenshot_backup_include_devices", True),
+        screenshot_device_subfolders=cfg.get("screenshot_device_subfolders", True),
+        device_screenshot_paths=cfg.get("device_screenshot_paths", {}),
+        exclude_synced_images_from_history=cfg.get("screenshot_exclude_from_history", True),
     )
     android: dict[str, AndroidNode] = {}
     hub_ref: dict[str, Hub] = {}
+    key_path = os.path.join(HERE, cfg.get("key_file", "copyclip.key"))
+    key_hex = ""
+    if os.path.isfile(key_path):
+        try:
+            with open(key_path, "r", encoding="utf-8") as f:
+                key_hex = f.read().strip()
+        except Exception:
+            pass
+
+    hub_ip = cfg.get("hub_ip", "100.64.0.1")
+    push_port = int(cfg.get("push_port", 8387))
 
     def on_connect(node: AndroidNode) -> None:
         hub = hub_ref.get("hub")
         if hub is not None:
             hub.on_node_connected(node)
+        if key_hex:
+            node.send_conf(key_hex, hub_ip, push_port, node.name)
 
     def on_lock_change(node: AndroidNode, locked: bool) -> None:
         hub = hub_ref.get("hub")

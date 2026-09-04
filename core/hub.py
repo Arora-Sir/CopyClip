@@ -50,27 +50,47 @@ class Hub:
         # Plain bool, not lock-guarded: a UI toggle racing one in-flight clip by a few
         # milliseconds is harmless, and CPython's GIL already makes the read/write atomic.
         self.paused = False
+        self.paused_devices: set[str] = set()
 
         self._stop = threading.Event()
         self._ticker: threading.Thread | None = None
         self._route_lock = threading.Lock()
-        # Nodes whose next observed clip is a *candidate* for "adopt without applying"
-        # rather than "route as a normal clip". This must happen ONLY on the first connect
-        # of this daemon's life: at startup we have no idea whether the device's clip is
-        # newer than the laptop's, so clobbering is rude. On a later reconnect the opposite
-        # is true, and re-arming it there would silently swallow a clip copied while the
-        # link was down, which is precisely the catch-up this is supposed to deliver.
-        #
-        # "First connect of this daemon's life" resets on every process restart, though --
-        # including a spurious one -- so on_clip() below also checks baseline_store (if
-        # given one) to tell "genuinely first time we've ever seen this device" apart from
-        # "just restarted, and this device's clip actually changed while we were down",
-        # which must NOT be silently dropped.
         self._baseline_pending: set[str] = set()
         self._baselined: set[str] = set()
         self._last_stamp_node: str | None = None
         self._last_stamp_time: float = 0.0
         self.stats = {"observed": 0, "delivered": 0, "skipped": 0, "queued": 0}
+
+    def pause_device(self, name: str) -> None:
+        self.paused_devices.add(name)
+        log.info("sync paused for device: %s", name)
+
+    def resume_device(self, name: str) -> None:
+        self.paused_devices.discard(name)
+        log.info("sync resumed for device: %s", name)
+
+    def is_device_paused(self, name: str) -> bool:
+        return self.paused or (name in self.paused_devices)
+
+    def reload_config(self, cfg: dict) -> None:
+        """Dynamically hot-reloads runtime policies, screenshot paths, and node configs."""
+        if hasattr(self.policy, "allow_images"):
+            self.policy.allow_images = bool(cfg.get("allow_images", True))
+        if hasattr(self.policy, "max_chars"):
+            self.policy.max_chars = int(cfg.get("max_chars", 800000))
+        if hasattr(self.policy, "max_image_bytes"):
+            self.policy.max_image_bytes = int(cfg.get("max_image_bytes", 25165824))
+
+        laptop_node = self.nodes.get("laptop")
+        if laptop_node is not None and hasattr(laptop_node, "update_config"):
+            laptop_node.update_config(
+                screenshot_dir=cfg.get("screenshot_backup_dir") or None,
+                screenshot_include_devices=cfg.get("screenshot_backup_include_devices", True),
+                screenshot_device_subfolders=cfg.get("screenshot_device_subfolders", False),
+                device_screenshot_paths=cfg.get("device_screenshot_paths", {}),
+                exclude_synced_images_from_history=cfg.get("screenshot_exclude_from_history", True),
+            )
+        log.info("hub configuration hot-reloaded dynamically")
 
     # -- topology ----------------------------------------------------------
 
@@ -170,8 +190,8 @@ class Hub:
 
     def on_clip(self, payload: ClipPayload) -> None:
         """A clip was observed on payload.origin."""
-        if self.paused:
-            log.debug("paused; ignoring clip from %s", payload.origin)
+        if self.paused or (payload.origin in self.paused_devices):
+            log.debug("sync paused for %s; ignoring clip", payload.origin)
             return
         with self._route_lock:
             sha = payload.sha256
@@ -303,6 +323,9 @@ class Hub:
     def _deliver_to_node(self, node: ClipboardNode, payload: ClipPayload,
                          origin_display: str | None = None, *,
                          queue_on_failure: bool = True) -> bool:
+        if self.is_device_paused(node.name):
+            log.debug("skipping delivery to %s; device is paused", node.name)
+            return True
         sha = payload.sha256
         display = origin_display or payload.origin
         if not self.dedup.should_deliver(sha, node.name):
@@ -405,8 +428,13 @@ class Hub:
 
     def status(self) -> dict:
         return {
-            "nodes": {n.name: {"available": n.available, "locked": n.locked}
-                      for n in self.nodes.values()},
+            "paused": self.paused,
+            "paused_devices": list(self.paused_devices),
+            "nodes": {n.name: {
+                "available": n.available,
+                "locked": n.locked,
+                "paused": self.is_device_paused(n.name),
+            } for n in self.nodes.values()},
             "domains": [d.status() for d in self.domains],
             "outbox": self.outbox.keys(),
             "stats": dict(self.stats),
