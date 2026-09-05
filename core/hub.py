@@ -80,6 +80,21 @@ class Hub:
             self.policy.max_chars = int(cfg.get("max_chars", 800000))
         if hasattr(self.policy, "max_image_bytes"):
             self.policy.max_image_bytes = int(cfg.get("max_image_bytes", 25165824))
+        if hasattr(self.policy, "allow_sensitive"):
+            new_allow_sensitive = bool(cfg.get("allow_sensitive", False))
+            if not new_allow_sensitive and self.policy.allow_sensitive:
+                self.outbox.drop_sensitive()
+            self.policy.allow_sensitive = new_allow_sensitive
+            for node in self.nodes.values():
+                if hasattr(node, "set_allow_sensitive"):
+                    node.set_allow_sensitive(new_allow_sensitive)
+
+        wipe_s = cfg.get("sensitive_wipe_s")
+        if wipe_s is not None:
+            wipe_s_float = float(wipe_s)
+            for node in self.nodes.values():
+                if hasattr(node, "set_sensitive_wipe_s"):
+                    node.set_sensitive_wipe_s(wipe_s_float)
 
         laptop_node = self.nodes.get("laptop")
         if laptop_node is not None and hasattr(laptop_node, "update_config"):
@@ -89,6 +104,7 @@ class Hub:
                 screenshot_device_subfolders=cfg.get("screenshot_device_subfolders", False),
                 device_screenshot_paths=cfg.get("device_screenshot_paths", {}),
                 exclude_synced_images_from_history=cfg.get("screenshot_exclude_from_history", True),
+                sensitive_wipe_s=float(wipe_s) if wipe_s is not None else None,
             )
         log.info("hub configuration hot-reloaded dynamically")
 
@@ -168,7 +184,7 @@ class Hub:
                           desc.node, desc.short)
                 return
 
-            if desc.sensitive:
+            if desc.sensitive and not self.policy.allow_sensitive:
                 self.stats["skipped"] += 1
                 log.info("skip clip from %s: flagged sensitive by the source app", desc.node)
                 return

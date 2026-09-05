@@ -22,6 +22,13 @@ import signal
 import sys
 import time
 
+if os.name == "nt":
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")
+    except Exception:
+        pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
@@ -164,6 +171,7 @@ def make_transport_factory(cfg: dict, dev: dict):
 
 
 def build_hub(cfg: dict) -> Hub:
+    wipe_s = float(cfg.get("sensitive_wipe_s", 10.0))
     laptop = WindowsNode(
         "laptop",
         screenshot_dir=cfg.get("screenshot_backup_dir") or None,
@@ -171,6 +179,7 @@ def build_hub(cfg: dict) -> Hub:
         screenshot_device_subfolders=cfg.get("screenshot_device_subfolders", True),
         device_screenshot_paths=cfg.get("device_screenshot_paths", {}),
         exclude_synced_images_from_history=cfg.get("screenshot_exclude_from_history", True),
+        sensitive_wipe_s=wipe_s,
     )
     android: dict[str, AndroidNode] = {}
     hub_ref: dict[str, Hub] = {}
@@ -211,6 +220,8 @@ def build_hub(cfg: dict) -> Hub:
             ack_timeout_s=cfg["ack_timeout_s"],
             max_image_bytes=cfg["max_image_bytes"],
             image_chunk_bytes=cfg["image_chunk_bytes"],
+            allow_sensitive=cfg.get("allow_sensitive", False),
+            sensitive_wipe_s=wipe_s,
             on_connect=on_connect,
             on_lock_change=on_lock_change,
         )
@@ -234,6 +245,7 @@ def build_hub(cfg: dict) -> Hub:
         policy=Policy(max_chars=cfg["max_chars"],
                       denylist_regex=cfg["denylist_regex"],
                       allow_non_text=cfg["allow_non_text"],
+                      allow_sensitive=cfg.get("allow_sensitive", False),
                       allow_images=cfg["allow_images"],
                       max_image_bytes=cfg["max_image_bytes"]),
         outbox=Outbox(os.path.join(HERE, cfg["state_dir"], "outbox.json")),

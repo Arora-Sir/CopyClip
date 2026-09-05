@@ -37,7 +37,8 @@ class WindowsNode(ClipboardNode):
                  screenshot_include_devices: bool = True,
                  screenshot_device_subfolders: bool = True,
                  device_screenshot_paths: dict[str, str] | None = None,
-                 exclude_synced_images_from_history: bool = True) -> None:
+                 exclude_synced_images_from_history: bool = True,
+                 sensitive_wipe_s: float = 10.0) -> None:
         super().__init__(name)
         self._watcher: winclip.ClipboardWatcher | None = None
         self._running = False
@@ -50,18 +51,23 @@ class WindowsNode(ClipboardNode):
         self._device_screenshot_paths = dict(device_screenshot_paths or {})
         self._exclude_synced_images_from_history = exclude_synced_images_from_history
         self._screenshot_dedup = RecentClips(ttl=20.0)
+        self.sensitive_wipe_s = float(sensitive_wipe_s)
+        self._wipe_timer: threading.Timer | None = None
 
     def update_config(self, *, screenshot_dir: str | None = None,
                       screenshot_include_devices: bool = True,
                       screenshot_device_subfolders: bool = True,
                       device_screenshot_paths: dict[str, str] | None = None,
-                      exclude_synced_images_from_history: bool = True) -> None:
+                      exclude_synced_images_from_history: bool = True,
+                      sensitive_wipe_s: float | None = None) -> None:
         """Hot-reloads screenshot directories and options at runtime without restart."""
         self._screenshot_dir = screenshot_dir or None
         self._screenshot_include_devices = screenshot_include_devices
         self._screenshot_device_subfolders = screenshot_device_subfolders
         self._device_screenshot_paths = dict(device_screenshot_paths or {})
         self._exclude_synced_images_from_history = exclude_synced_images_from_history
+        if sensitive_wipe_s is not None:
+            self.sensitive_wipe_s = float(sensitive_wipe_s)
         log.info("[%s] runtime configuration updated (dir=%s, subfolders=%s, custom=%s)",
                  self.name, self._screenshot_dir, self._screenshot_device_subfolders,
                  list(self._device_screenshot_paths.keys()))
@@ -76,6 +82,9 @@ class WindowsNode(ClipboardNode):
 
     def stop(self) -> None:
         self._running = False
+        if self._wipe_timer is not None:
+            self._wipe_timer.cancel()
+            self._wipe_timer = None
         if self._watcher is not None:
             self._watcher.stop()
             self._watcher = None
@@ -125,11 +134,17 @@ class WindowsNode(ClipboardNode):
                 seq, self._own_write_seq = self._own_write_seq, None
                 if winclip.sequence_number() == seq:
                     return  # our own image write echoing back through the same watcher
+            # User copied something locally. Cancel any pending sensitive-wipe so the
+            # new content is not silently wiped by a stale timer.
+            if self._wipe_timer is not None:
+                self._wipe_timer.cancel()
+                self._wipe_timer = None
         payload = self._read()
         if payload is not None and payload.size:
             if payload.is_image:
                 self._maybe_save_screenshot(payload)
             self._emit(payload)
+
 
     def request_refresh(self) -> None:
         payload = self._read()
@@ -193,12 +208,41 @@ class WindowsNode(ClipboardNode):
         except Exception:
             log.warning("[%s] screenshot backup failed", self.name, exc_info=True)
 
+    def _wipe_sensitive(self, target_seq: int) -> None:
+        """Clear sensitive text from clipboard if it has not been superseded.
+
+        Uses winclip.clear_clipboard() (bare EmptyClipboard, no SetClipboardData)
+        so the wipe does NOT create a blank tile in Windows Clipboard History (Win+V).
+        Stamps _own_write_seq immediately so the ClipboardWatcher echo is suppressed
+        and the empty state is not re-broadcast to Android nodes.
+        """
+        with self._write_lock:
+            current_seq = winclip.sequence_number()
+            if current_seq == target_seq:
+                try:
+                    new_seq = winclip.clear_clipboard()
+                    self._own_write_seq = new_seq
+                    self._wipe_timer = None
+                    log.info("[%s] sensitive clip auto-wiped after %.0fs (no Win+V entry)",
+                             self.name, self.sensitive_wipe_s)
+                except Exception as exc:
+                    log.warning("[%s] sensitive clip auto-wipe failed: %s", self.name, exc)
+            else:
+                log.debug("[%s] sensitive clip superseded (seq %d != %d), wipe skipped",
+                          self.name, current_seq, target_seq)
+            self._wipe_timer = None
+
+
     def write(self, payload: ClipPayload) -> str:
         if payload.is_image:
             if self._screenshot_include_devices:
                 self._maybe_save_screenshot(payload)
             try:
                 with self._write_lock:
+                    # Cancel any pending sensitive-wipe: the new image supersedes the clip.
+                    if self._wipe_timer is not None:
+                        self._wipe_timer.cancel()
+                        self._wipe_timer = None
                     winclip.write_image(
                         payload.data, payload.mime,
                         exclude_from_history=self._exclude_synced_images_from_history)
@@ -219,8 +263,25 @@ class WindowsNode(ClipboardNode):
             return WriteResult.REJECTED
         try:
             with self._write_lock:
-                winclip.write_text(text)
+                if payload.sensitive:
+                    winclip.write_text_sensitive(text)
+                    seq = winclip.sequence_number()
+                    self._own_write_seq = seq
+                    if self._wipe_timer is not None:
+                        self._wipe_timer.cancel()
+                    wipe_s = max(1.0, float(self.sensitive_wipe_s))
+                    self._wipe_timer = threading.Timer(wipe_s, self._wipe_sensitive, args=(seq,))
+                    self._wipe_timer.daemon = True
+                    self._wipe_timer.start()
+                    log.info("[%s] wrote sensitive text; auto-wipe timer armed (%.0fs)", self.name, wipe_s)
+                else:
+                    # Cancel any pending sensitive-wipe: non-sensitive content supersedes it.
+                    if self._wipe_timer is not None:
+                        self._wipe_timer.cancel()
+                        self._wipe_timer = None
+                    winclip.write_text(text)
             return WriteResult.OK
         except Exception:
             log.exception("[%s] write failed", self.name)
             return WriteResult.FAILED
+

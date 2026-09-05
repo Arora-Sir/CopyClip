@@ -20,8 +20,10 @@ in real use, not merely when a test passes.
 | [BUG-010](BUG-010-samsung-sef-screenshot-delay.md) | Samsung One UI SEF metadata trailers on JPEGs fail `isCompleteImage()`, causing an infinite 8-second thread freeze loop and 60-90s screenshot copy delay | High | **CONFIRMED, fixed in real use (2026-09-03)** |
 | [BUG-011](BUG-011-pixel-screenshot-sync-and-sendclip.md) | Pixel 1 screenshot sync suppressed by `initScreenshotWatch` baseline race, 12s chunk ACK timeout, and SendClip clipboard limitation | High | **CONFIRMED, fixed and verified live on hardware (2026-09-03)** |
 | [BUG-012](BUG-012-screenshot-traversal-storm-and-battery-drain.md) | High idle CPU and flash wear: 2,912 File.listFiles() stats/sec screenshot traversal storm, keyguard polling loop, and companion app 4s config write loop | High (battery, CPU, flash wear) | **CONFIRMED, fixed and verified live on hardware (2026-09-04)** |
+| [BUG-013](BUG-013-sensitive-clip-sync-winv-blank-tile-and-timer-race.md) | Sensitive clip dropping (Google Authenticator), Win+V history blank card artifact, timer supersession race, and dashboard queue count discrepancy | High (credential sync, visual history pollution) | **CONFIRMED, fixed and verified live on hardware (2026-09-05)** |
 
 ## Companion files
+
 
 - **[DEVICE-STATE.md](DEVICE-STATE.md)** — measured baseline of both devices: settings,
   package enabled-states, `appops` clipboard permissions, running cross-device services.

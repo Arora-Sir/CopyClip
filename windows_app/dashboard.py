@@ -66,6 +66,10 @@ _is_open = False
 
 def open_dashboard(hub, cfg: dict | None = None, initial_tab: int = 0) -> None:
     global _is_open
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")
+    except Exception:
+        pass
     with _open_lock:
         if _is_open:
             return
@@ -77,16 +81,60 @@ def open_dashboard(hub, cfg: dict | None = None, initial_tab: int = 0) -> None:
 
 def _apply_win11_attributes(root: tk.Tk | tk.Toplevel) -> None:
     """Enables Windows 11 dark title bar, smooth rounded corners, and consistent icon."""
+    try:
+        # Decouple process from generic python.exe/tk taskbar group to prevent feather icon
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")
+    except Exception:
+        pass
+
     if os.path.isfile(ICON_PATH):
+        try:
+            root.iconbitmap(default=ICON_PATH)
+        except Exception:
+            pass
         try:
             root.iconbitmap(ICON_PATH)
         except Exception:
             pass
     try:
         root.update_idletasks()
-        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
-        if not hwnd:
-            hwnd = root.winfo_id()
+        hwnds_to_set = []
+        try:
+            frame_id = int(root.wm_frame(), 16)
+            if frame_id:
+                hwnds_to_set.append(frame_id)
+        except Exception:
+            pass
+        try:
+            parent_id = ctypes.windll.user32.GetParent(root.winfo_id())
+            if parent_id and parent_id not in hwnds_to_set:
+                hwnds_to_set.append(parent_id)
+        except Exception:
+            pass
+        if root.winfo_id() not in hwnds_to_set:
+            hwnds_to_set.append(root.winfo_id())
+
+        hwnd = hwnds_to_set[0] if hwnds_to_set else root.winfo_id()
+
+        # Force native taskbar and titlebar icons via Win32 WM_SETICON
+        if os.path.isfile(ICON_PATH):
+            try:
+                IMAGE_ICON = 1
+                LR_LOADFROMFILE = 0x0010
+                hicon_big = ctypes.windll.user32.LoadImageW(
+                    None, ICON_PATH, IMAGE_ICON, 32, 32, LR_LOADFROMFILE
+                )
+                hicon_small = ctypes.windll.user32.LoadImageW(
+                    None, ICON_PATH, IMAGE_ICON, 16, 16, LR_LOADFROMFILE
+                )
+                for h in hwnds_to_set:
+                    if hicon_big:
+                        ctypes.windll.user32.SendMessageW(h, 0x0080, 1, hicon_big)   # WM_SETICON, ICON_BIG
+                    if hicon_small:
+                        ctypes.windll.user32.SendMessageW(h, 0x0080, 0, hicon_small) # WM_SETICON, ICON_SMALL
+            except Exception:
+                pass
+
         dwmapi = ctypes.windll.dwmapi
         # DWMWA_USE_IMMERSIVE_DARK_MODE (20 on Win11/Win10 20H1+, 19 on older)
         for attr in (20, 19):
@@ -152,6 +200,10 @@ def _add_hover_effect(btn: tk.Widget, normal_bg: str, hover_bg: str, normal_fg: 
 def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
     global _is_open
     try:
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")
+        except Exception:
+            pass
         root = tk.Tk()
         root.title("CopyClip")
         root.configure(bg=BG)
@@ -296,10 +348,12 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
         stat_col2 = tk.Frame(stats_card, bg=SURFACE)
         stat_col2.pack(side="left", fill="x", expand=True)
         stat_queue_val = tk.StringVar(value="0")
-        tk.Label(stat_col2, textvariable=stat_queue_val, bg=SURFACE, fg=WARNING,
-                 font=(FONT_FAMILY, 15, "bold")).pack(anchor="w")
+        stat_queue_label = tk.Label(stat_col2, textvariable=stat_queue_val, bg=SURFACE,
+                                    fg=TEXT_MUTED, font=(FONT_FAMILY, 15, "bold"))
+        stat_queue_label.pack(anchor="w")
         tk.Label(stat_col2, text="Outbox Queued", bg=SURFACE, fg=TEXT_MUTED,
                  font=(FONT_FAMILY, 8)).pack(anchor="w")
+
 
         # Divider 2
         tk.Frame(stats_card, bg=SURFACE_BORDER, width=1, height=36).pack(side="left", padx=8)
@@ -814,6 +868,56 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
                                    activebackground=SURFACE, activeforeground=TEXT, font=(FONT_FAMILY, 8))
         chk_adopt.pack(anchor="w", pady=(6, 0))
 
+        allow_sensitive_var = tk.BooleanVar(value=curr_cfg.get("allow_sensitive", False))
+
+        def _on_sensitive_toggle():
+            if allow_sensitive_var.get():
+                warn_msg = (
+                    "Sync Sensitive Clips (OTPs & Credentials)\n\n"
+                    "Enabling this feature will synchronize 2FA OTP codes, Google Authenticator "
+                    "tiles, and password-manager clipboard copies across your mesh devices.\n\n"
+                    "Security Protections Enforced:\n"
+                    " - Auto-wipe timer (default 10s, configurable) across devices\n"
+                    " - Excluded from Windows Clipboard History (Win+V)\n"
+                    " - Blocked from Microsoft Cloud Clipboard sync\n"
+                    " - Never persisted to outbox storage on SSD (volatile RAM only)\n\n"
+                    "Important Caution:\n"
+                    "Any background application running with standard user privileges on Windows "
+                    "can read the Windows clipboard while a code is present.\n\n"
+                    "Do you want to enable sensitive clipboard sync anyway?"
+                )
+                confirmed = messagebox.askyesno("Enable Sensitive Clipboard Sync", warn_msg, icon="warning")
+                if not confirmed:
+                    allow_sensitive_var.set(False)
+
+        chk_sens_sync = tk.Checkbutton(
+            policy_card,
+            text="Sync Sensitive Clips (OTPs, Authenticator codes) [EXPERIMENTAL]",
+            variable=allow_sensitive_var,
+            command=_on_sensitive_toggle,
+            bg=SURFACE, fg="#f59e0b", selectcolor=SURFACE_CARD,
+            activebackground=SURFACE, activeforeground="#f59e0b",
+            font=(FONT_FAMILY, 9, "bold")
+        )
+        chk_sens_sync.pack(anchor="w", pady=(8, 0))
+
+        tk.Label(
+            policy_card,
+            text="Protected by auto-wipe timer, Win+V history exclusion, and Microsoft Cloud sync blocking.",
+            bg=SURFACE, fg=TEXT_DIM, font=(FONT_FAMILY, 8)
+        ).pack(anchor="w", padx=(24, 0), pady=(0, 4))
+
+        wipe_row = tk.Frame(policy_card, bg=SURFACE)
+        wipe_row.pack(anchor="w", padx=(24, 0), pady=(4, 6))
+        tk.Label(wipe_row, text="Auto-Wipe Timer (seconds):", bg=SURFACE, fg=TEXT, font=(FONT_FAMILY, 9)).pack(side="left")
+        sensitive_wipe_entry = tk.Entry(wipe_row, bg=SURFACE_CARD, fg=TEXT, insertbackground=TEXT,
+                                        font=(FONT_MONO, 9), width=5, relief="flat",
+                                        highlightthickness=1, highlightbackground=SURFACE_BORDER)
+        sensitive_wipe_entry.insert(0, str(int(round(curr_cfg.get("sensitive_wipe_s", 10.0)))))
+        sensitive_wipe_entry.pack(side="left", padx=(8, 12))
+        tk.Label(wipe_row, text="(Default: 10s. Clears clipboard automatically on all devices)",
+                 bg=SURFACE, fg=TEXT_DIM, font=(FONT_FAMILY, 8)).pack(side="left")
+
         # 4. Network, Timers & Security Section
         tk.Label(config_scroll_content, text="NETWORK, TIMERS & CRYPTOGRAPHIC SECURITY", bg=BG, fg=TEXT_MUTED,
                  font=(FONT_FAMILY, 9, "bold")).pack(anchor="w", pady=(10, 8))
@@ -904,13 +1008,18 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
                 max_mb = int(max_mb_entry.get().strip())
                 push_p = int(port_entry.get().strip())
                 ack_t = float(ack_entry.get().strip())
+                sens_wipe = float(sensitive_wipe_entry.get().strip())
+                if sens_wipe < 1.0:
+                    sens_wipe = 1.0
             except ValueError:
-                messagebox.showerror("Validation Error", "Please verify numeric fields (Max chars, Max MB, Port, Ack timeout).")
+                messagebox.showerror("Validation Error", "Please verify numeric fields (Max chars, Max MB, Port, Ack timeout, Auto-Wipe Timer).")
                 return
 
             new_cfg = dict(curr_cfg)
             new_cfg["devices"] = devices_list
             new_cfg["allow_images"] = allow_images_var.get()
+            new_cfg["allow_sensitive"] = allow_sensitive_var.get()
+            new_cfg["sensitive_wipe_s"] = sens_wipe
             new_cfg["max_image_bytes"] = max_mb * 1024 * 1024
             new_cfg["screenshot_backup_dir"] = base_ss_entry.get().strip()
             new_cfg["screenshot_backup_include_devices"] = inc_device_ss_var.get()
@@ -969,7 +1078,10 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
             # Update stats
             stats = status.get("stats", {})
             stat_deliv_val.set(str(stats.get("delivered", 0)))
-            stat_queue_val.set(str(stats.get("queued", 0)))
+            active_queued = len(status.get("outbox", []))
+            stat_queue_val.set(str(active_queued))
+            stat_queue_label.config(fg=WARNING if active_queued > 0 else TEXT_MUTED)
+
 
             # Count online nodes
             online_count = sum(1 for n, inf in status.get("nodes", {}).items() if inf.get("available") and n != "laptop")

@@ -76,6 +76,8 @@ class AndroidNode(ClipboardNode):
                  reconnect_min_s: float = 1.0, reconnect_max_s: float = 30.0,
                  idle_ping_s: float = 60.0, ack_timeout_s: float = 4.0,
                  max_image_bytes: int = 25_165_824, image_chunk_bytes: int = CHUNK_BYTES,
+                 allow_sensitive: bool = False,
+                 sensitive_wipe_s: float = 10.0,
                  on_connect: Callable[["AndroidNode"], None] | None = None,
                  on_lock_change: Callable[["AndroidNode", bool], None] | None = None) -> None:
         super().__init__(name)
@@ -86,6 +88,8 @@ class AndroidNode(ClipboardNode):
         self.ack_timeout_s = ack_timeout_s
         self.max_image_bytes = max_image_bytes
         self.image_chunk_bytes = image_chunk_bytes
+        self.allow_sensitive = allow_sensitive
+        self.sensitive_wipe_s = float(sensitive_wipe_s)
         self._on_connect = on_connect
         self._on_lock_change = on_lock_change
 
@@ -172,6 +176,7 @@ class AndroidNode(ClipboardNode):
                 # next apply_modes() actually re-sends the intended mode.
                 self._mode = "full"
             log.info("[%s] connected", self.name)
+            self._send_conf()
             if self._on_connect is not None:
                 # Deliberately NOT called synchronously here. on_connect (hub.py's
                 # on_node_connected) can call write() as part of catching up a queued
@@ -209,6 +214,33 @@ class AndroidNode(ClipboardNode):
             self._on_connect(self)
         except Exception:
             log.exception("[%s] on_connect handler failed", self.name)
+
+    def _send_conf(self) -> None:
+        """Send current configuration to ClipBridge via CONF command."""
+        try:
+            payload = json.dumps({
+                "allow_sensitive": bool(self.allow_sensitive),
+                "sensitive_wipe_s": int(self.sensitive_wipe_s),
+            })
+            b64 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+            with self._lock:
+                transport = self._transport
+                if transport is not None and transport.alive():
+                    transport.send_line(f"CONF {b64}")
+            log.debug("[%s] sent CONF allow_sensitive=%s wipe_s=%.0f",
+                      self.name, self.allow_sensitive, self.sensitive_wipe_s)
+        except Exception as exc:
+            log.warning("[%s] failed to send CONF: %s", self.name, exc)
+
+    def set_allow_sensitive(self, allow: bool) -> None:
+        """Update allow_sensitive setting and resend CONF to live ClipBridge."""
+        self.allow_sensitive = bool(allow)
+        self._send_conf()
+
+    def set_sensitive_wipe_s(self, wipe_s: float) -> None:
+        """Update sensitive_wipe_s setting and resend CONF to live ClipBridge."""
+        self.sensitive_wipe_s = float(wipe_s)
+        self._send_conf()
 
     def _pump(self, transport) -> None:
         last_seen = time.time()
@@ -392,7 +424,7 @@ class AndroidNode(ClipboardNode):
                 self._ack_event.set()
             log.debug("[%s] %s", self.name, line)
 
-        elif verb in ("PONG", "READY"):
+        elif verb in ("PONG", "READY", "CONF-ACK"):
             log.debug("[%s] %s", self.name, line)
 
         else:
@@ -433,8 +465,9 @@ class AndroidNode(ClipboardNode):
 
         self._ack_event.clear()
         self._ack_verb = "set"
+        cmd = "SETS" if payload.sensitive else "SET"
         try:
-            transport.send_line(f"SET {payload.to_b64()}")
+            transport.send_line(f"{cmd} {payload.to_b64()}")
         except TransportError as exc:
             log.warning("[%s] write failed: %s", self.name, exc)
             self._ack_verb = None

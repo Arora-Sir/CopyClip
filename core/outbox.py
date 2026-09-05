@@ -79,6 +79,21 @@ class Outbox:
         with self._lock:
             return not self._slots
 
+    def drop_sensitive(self) -> int:
+        """Purge all sensitive slots held in volatile memory.
+
+        Called when allow_sensitive policy is toggled off at runtime.
+        Since sensitive payloads are never written to disk, disk state is untouched.
+        Returns count of dropped slots.
+        """
+        with self._lock:
+            dropped = [k for k, v in self._slots.items() if v.sensitive]
+            for k in dropped:
+                del self._slots[k]
+        if dropped:
+            log.info("outbox dropped %d sensitive in-flight slot(s): %s", len(dropped), dropped)
+        return len(dropped)
+
     # -- persistence -------------------------------------------------------
 
     def _write_sidecar(self, path: str, data: bytes) -> None:
@@ -109,6 +124,10 @@ class Outbox:
         data = {}
         live_sidecars = set()
         for k, v in self._slots.items():
+            if v.sensitive:
+                # Sensitive payloads (OTPs, credentials) must NEVER touch disk.
+                # They stay in memory in self._slots only.
+                continue
             if v.is_image:
                 fname = _sidecar_name(k)
                 live_sidecars.add(fname)

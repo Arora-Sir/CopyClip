@@ -154,6 +154,7 @@ _MIME_REGISTERED = {v: k for k, v in _REGISTERED_MIME.items()}
 # pastes it correctly -- this only affects History's bookkeeping, never the live clipboard)
 # in exchange for not disturbing the rest of the user's history.
 CF_CAN_INCLUDE_IN_HISTORY = user32.RegisterClipboardFormatW("CanIncludeInClipboardHistory")
+CF_CAN_UPLOAD_TO_CLOUD = user32.RegisterClipboardFormatW("CanUploadToCloudClipboard")
 
 
 class _Opened:
@@ -333,6 +334,56 @@ def write_text(text: str, attempts: int = 4) -> None:
     """Replace the clipboard with `text`."""
     data = text.encode("utf-16-le") + b"\x00\x00"
     _write_retrying([(CF_UNICODETEXT, data)], attempts)
+
+
+def write_text_sensitive(text: str, attempts: int = 4) -> None:
+    """Replace the clipboard with sensitive `text`, explicitly excluding it from
+    both Windows Clipboard History (Win+V) and Microsoft Cloud Clipboard sync.
+    """
+    data = text.encode("utf-16-le") + b"\x00\x00"
+    zero = (0).to_bytes(4, "little")
+    items = [
+        (CF_UNICODETEXT, data),
+        (CF_CAN_INCLUDE_IN_HISTORY, zero),
+        (CF_CAN_UPLOAD_TO_CLOUD, zero),
+    ]
+    _write_retrying(items, attempts)
+
+
+def clear_clipboard(attempts: int = 4) -> int:
+    """Empty the clipboard without setting any format data.
+
+    Calls EmptyClipboard() inside an open/close cycle, then immediately closes
+    without calling SetClipboardData() for any format. Windows Clipboard History
+    (Win+V) only creates new entries when SetClipboardData() is called with an
+    actual format payload; a bare EmptyClipboard() call is invisible to the
+    history, so no blank tile is added.
+
+    Returns the new clipboard sequence number so callers can update their own
+    write stamp and suppress the echo from ClipboardWatcher._on_change().
+    """
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            with _Opened():
+                if not user32.EmptyClipboard():
+                    raise OSError(
+                        f"EmptyClipboard failed (err={ctypes.get_last_error()})"
+                    )
+            # Sequence number advances when EmptyClipboard succeeds. Read it while
+            # the lock is released -- no clipboard ownership needed for this call.
+            return sequence_number()
+        except (OSError, ClipboardBusy) as exc:
+            last = exc
+            err = getattr(exc, "winerror", None) or ctypes.get_last_error()
+            if isinstance(exc, OSError) and err not in _TRANSIENT:
+                raise
+            log.warning(
+                "clear_clipboard attempt %d/%d failed (%s); retrying",
+                i + 1, attempts, exc,
+            )
+            time.sleep(0.05 * (i + 1))
+    raise OSError(f"clear_clipboard failed after {attempts} attempts: {last}")
 
 
 def write_image(data: bytes, mime: str, attempts: int = 4, *,

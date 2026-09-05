@@ -47,7 +47,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import org.json.JSONObject;
 
 /**
  * CopyClip on-device clipboard bridge.
@@ -151,6 +156,18 @@ public final class ClipBridge {
      * because Samsung relays it to the representative where it is read once.
      */
     private static volatile boolean stampOnly = false;
+
+    /**
+     * When true this device announces sensitive clips (OTPs, Authenticator codes) rather
+     * than dropping them with SKIP. Set via CONF handshake from the laptop.
+     */
+    private static volatile boolean allowSensitive = false;
+
+    private static volatile boolean pendingSetSensitive = false;
+
+    private static final ScheduledExecutorService wipeExecutor = Executors.newSingleThreadScheduledExecutor();
+    private static volatile ScheduledFuture<?> pendingWipeFuture;
+    private static volatile long sensitiveWipeSeconds = 10L;
 
     /**
      * Hash of content we just wrote on behalf of the laptop. The write bumps the clipboard
@@ -272,6 +289,14 @@ public final class ClipBridge {
                         return;
                     }
                     doSet(args[1]);
+                    break;
+                case "sets":
+                    if (args.length < 2) {
+                        emit("ERR sets requires a base64 argument");
+                        System.exit(2);
+                        return;
+                    }
+                    doSetSensitive(args[1]);
                     break;
                 case "serve":
                     serve();
@@ -430,6 +455,32 @@ public final class ClipBridge {
         return (ClipDescription) call(clipboard, "getPrimaryClipDescription", null);
     }
 
+    private static synchronized void cancelSensitiveWipe() {
+        if (pendingWipeFuture != null) {
+            pendingWipeFuture.cancel(false);
+            pendingWipeFuture = null;
+        }
+    }
+
+    private static synchronized void scheduleSensitiveWipe() {
+        cancelSensitiveWipe();
+        final long targetStamp = ownWriteStamp;
+        pendingWipeFuture = wipeExecutor.schedule(() -> {
+            try {
+                ClipDescription current = getDescription();
+                long currentStamp = current == null ? 0L : current.getTimestamp();
+                if (currentStamp == targetStamp) {
+                    // Clipboard has not changed since the sensitive write. Wipe it.
+                    // Re-using doSet("") ensures suppressHash and ownWriteStamp are updated,
+                    // so this wipe write emits STAMP instead of echoing DESC to other nodes.
+                    String emptyB64 = Base64.getEncoder().encodeToString("".getBytes(StandardCharsets.UTF_8));
+                    doSetInternal(emptyB64, false);
+                }
+            } catch (Throwable ignored) {
+            }
+        }, sensitiveWipeSeconds, TimeUnit.SECONDS);
+    }
+
     /**
      * Writes the clipboard, or parks the payload if the device is locked.
      *
@@ -438,34 +489,62 @@ public final class ClipBridge {
      * exception is exactly how this fails silently.
      */
     private static void doSet(String b64) throws Exception {
+        doSetInternal(b64, false);
+    }
+
+    private static void doSetSensitive(String b64) throws Exception {
+        doSetInternal(b64, true);
+    }
+
+    private static void doSetInternal(String b64, boolean sensitive) throws Exception {
         if (isLocked()) {
             pendingSet = b64;
+            pendingSetSensitive = sensitive;
             emit("DEFER set locked");
             return;
         }
+        // A non-sensitive write supersedes any pending sensitive-wipe timer.
+        if (!sensitive) {
+            cancelSensitiveWipe();
+        }
         String text = new String(Base64.getDecoder().decode(b64), StandardCharsets.UTF_8);
         suppressHash = sha256(text);
+        // Note: ClipData.newPlainText() does not accept PersistableBundle extras. On the write
+        // direction to Android, we write plain text. System UI protections are honored on the
+        // read direction (EXTRA_IS_SENSITIVE), while write direction relies on the 60s auto-wipe.
         call(clipboard, "setPrimaryClip", ClipData.newPlainText("CopyClip", text));
 
         ClipDescription after = getDescription();
         if (after == null) {
             pendingSet = b64;
+            pendingSetSensitive = sensitive;
             emit("DEFER set discarded");
             return;
         }
         // Remember the stamp our own write produced so the poll loop does not read it back.
         ownWriteStamp = after.getTimestamp();
         pendingSet = null;
+        pendingSetSensitive = false;
+        if (sensitive) {
+            scheduleSensitiveWipe();
+        }
         emit("ACK set");
     }
+
 
     /** Replays a parked write once the device unlocks. */
     private static void flushPending() {
         String b64 = pendingSet;
+        boolean sens = pendingSetSensitive;
         if (b64 != null && !isLocked()) {
             try {
                 pendingSet = null;
-                doSet(b64);
+                pendingSetSensitive = false;
+                if (sens) {
+                    doSetSensitive(b64);
+                } else {
+                    doSet(b64);
+                }
             } catch (Throwable t) {
                 emit("ERR flush: " + describe(t));
             }
@@ -540,7 +619,7 @@ public final class ClipBridge {
         ClipDescription desc = getDescription();
         String mime = mimeOf(desc);
 
-        if (isSensitive(desc)) {
+        if (isSensitive(desc) && !allowSensitive) {
             emit("SKIP " + mime + " sensitive");
             return;
         }
@@ -570,7 +649,8 @@ public final class ClipBridge {
         if (hash.equals(suppressHash)) {
             return; // our own write coming back around
         }
-        emit("DESC " + mime + " 0 " + (desc == null ? 0L : desc.getTimestamp())
+        emit("DESC " + mime + " " + (isSensitive(desc) ? 1 : 0) + " "
+                + (desc == null ? 0L : desc.getTimestamp())
                 + " " + hash + " " + text.length());
     }
 
@@ -579,7 +659,7 @@ public final class ClipBridge {
         ClipDescription desc = getDescription();
         String mime = mimeOf(desc);
 
-        if (isSensitive(desc)) {
+        if (isSensitive(desc) && !allowSensitive) {
             emit("SKIP " + mime + " sensitive");
             return null;
         }
@@ -688,17 +768,23 @@ public final class ClipBridge {
                         // clipboard" toast for a clip the user never copied.
                         emit("STAMP " + stamp);
                     } else if (stampOnly) {
+                        // User made a local copy while in stamp-only mode.
+                        cancelSensitiveWipe();
                         emit("STAMP " + stamp);
                     } else if (System.currentTimeMillis() - lastHubContact > IDLE_ORPHAN_MS) {
                         // Orphaned: the laptop has been silent well past its own idle-ping
                         // cycle, most likely because the network dropped and this process
                         // just hasn't been torn down yet. Treat like stampOnly until contact
                         // resumes, rather than reading content nobody can currently receive.
+                        cancelSensitiveWipe();
                         emit("STAMP " + stamp);
                     } else {
+                        // User made a local copy. Cancel stale sensitive-wipe before reading.
+                        cancelSensitiveWipe();
                         emitDesc();
                     }
                 }
+
             } catch (Throwable t) {
                 emit("ERR poll: " + describe(t));
             }
@@ -723,6 +809,9 @@ public final class ClipBridge {
                     switch (verb) {
                         case "SET":
                             doSet(rest);
+                            break;
+                        case "SETS":
+                            doSetSensitive(rest);
                             break;
                         case "GET":
                             emitCurrentClip(true);
@@ -774,6 +863,21 @@ public final class ClipBridge {
             }
             confFile.setReadable(true, false);
             confFile.setWritable(true, false);
+
+            try {
+                String jsonStr = new String(decoded, StandardCharsets.UTF_8);
+                JSONObject obj = new JSONObject(jsonStr);
+                if (obj.has("allow_sensitive")) {
+                    allowSensitive = obj.optBoolean("allow_sensitive", false);
+                }
+                if (obj.has("sensitive_wipe_s")) {
+                    sensitiveWipeSeconds = Math.max(1L, obj.optLong("sensitive_wipe_s", 10L));
+                } else if (obj.has("wipe_s")) {
+                    sensitiveWipeSeconds = Math.max(1L, obj.optLong("wipe_s", 10L));
+                }
+            } catch (Throwable ignored) {
+            }
+
             emit("CONF-ACK");
         } catch (Throwable t) {
             emit("ERR conf: " + describe(t));
@@ -1530,6 +1634,8 @@ public final class ClipBridge {
             emit("DEFER set locked");
             return;
         }
+        // An image write supersedes any pending sensitive-wipe timer.
+        cancelSensitiveWipe();
 
         Uri uri = insertImage(data, mime);
         suppressHash = sha256Bytes(data);

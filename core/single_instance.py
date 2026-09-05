@@ -53,8 +53,9 @@ class AlreadyRunning(RuntimeError):
 
 
 class SingleInstance:
-    def __init__(self, pidfile: str) -> None:
+    def __init__(self, pidfile: str, mutex_name: str = MUTEX_NAME) -> None:
         self.pidfile = pidfile
+        self.mutex_name = mutex_name
         self._handle = None
 
     # -- helpers -----------------------------------------------------------
@@ -76,7 +77,7 @@ class SingleInstance:
 
     def _try_mutex(self) -> bool:
         """True if we now own the singleton."""
-        handle = kernel32.CreateMutexW(None, True, MUTEX_NAME)
+        handle = kernel32.CreateMutexW(None, True, self.mutex_name)
         err = ctypes.get_last_error()
         if not handle:
             log.warning("CreateMutexW failed (err=%s); continuing without a guard", err)

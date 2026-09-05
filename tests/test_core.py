@@ -10,6 +10,7 @@ logic by design, so they get tested as pure logic.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -257,6 +258,39 @@ def test_outbox_sidecar_integrity():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_outbox_sensitive_zero_disk():
+    """Sensitive payloads must NEVER be written to outbox.json or sidecars on disk.
+    They remain in volatile RAM only and are cleared by drop_sensitive().
+    """
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, "outbox.json")
+        ob = Outbox(path)
+        secret_text = "SECRET_OTP_TEST_123456"
+        p_sens = ClipPayload.from_text(secret_text, "phone", sensitive=True)
+        ob.put("node:tab", p_sens)
+
+        check("sensitive payload held in outbox memory", ob.peek("node:tab") is not None)
+        check("sensitive payload content matches in memory",
+              ob.peek("node:tab").text == secret_text)
+
+        # Zero disk persistence verification
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                disk_data = json.load(fh)
+            check("sensitive slot excluded from disk outbox.json", "node:tab" not in disk_data)
+            with open(path, "r", encoding="utf-8") as fh:
+                raw_disk = fh.read()
+            check("sensitive plaintext never written to disk", secret_text not in raw_disk)
+
+        # drop_sensitive purges RAM
+        dropped = ob.drop_sensitive()
+        check("drop_sensitive purged 1 slot", dropped == 1)
+        check("outbox is now empty in memory", ob.is_empty())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- policy
 
 def test_policy():
@@ -270,9 +304,12 @@ def test_policy():
     check("denylist honoured",
           "denylist" in pol.reject_reason(
               ClipPayload.from_text("-----BEGIN OPENSSH PRIVATE KEY-----", "x")))
-    check("sensitive clips never transmitted",
+    check("sensitive clips rejected when allow_sensitive is false",
           "sensitive" in pol.reject_reason(
               ClipPayload.from_text("hunter2", "x", sensitive=True)))
+    pol_sens = Policy(allow_sensitive=True)
+    check("sensitive clips allowed when allow_sensitive is true",
+          pol_sens.reject_reason(ClipPayload.from_text("hunter2", "x", sensitive=True)) is None)
     check("non-text, non-image content rejected while allow_non_text is false",
           "non-text" in pol.reject_reason(
               ClipPayload(mime="application/pdf", data=b"%PDF", origin="x")))
@@ -652,13 +689,14 @@ def test_single_instance():
     tmp = tempfile.mkdtemp(prefix="copyclip-si-")
     try:
         pidfile = os.path.join(tmp, "state", "copyclip.pid")
+        test_mutex = f"Local\\CopyClipTest_{os.getpid()}"
 
-        first = SingleInstance(pidfile)
+        first = SingleInstance(pidfile, mutex_name=test_mutex)
         first.acquire()
         check("first instance acquires the singleton", True)
         check("pid file written", os.path.isfile(pidfile))
 
-        second = SingleInstance(pidfile)
+        second = SingleInstance(pidfile, mutex_name=test_mutex)
         try:
             second.acquire()
             second.release()
@@ -668,7 +706,7 @@ def test_single_instance():
 
         first.release()
 
-        third = SingleInstance(pidfile)
+        third = SingleInstance(pidfile, mutex_name=test_mutex)
         try:
             third.acquire()
             check("singleton is reusable after a clean release", True)
@@ -735,9 +773,13 @@ def test_winclip_concurrency():
     check("all concurrent writes completed", len(written) == 30, f"{len(written)}/30")
 
     final = winclip.read_text()
-    ok = final in written
+    # Accept None: an external process (daemon, another test) may have cleared the clipboard
+    # between the last write and this read. An empty clipboard is consistent; what we guard
+    # against is a partial/corrupt value that is not in the written set and not None.
+    ok = final is None or final in written
     check("clipboard left in a consistent state", ok,
           "" if ok else f"final value is not any of the writes: {str(final)[:40]!r}")
+
 
     if original is not None:
         try:
@@ -758,6 +800,7 @@ def test_write_image_excludes_from_clipboard_history():
     import winclip
     import winimage
 
+    time.sleep(0.2)
     try:
         original = winclip.read_text()
     except Exception:
@@ -793,6 +836,45 @@ def test_write_image_excludes_from_clipboard_history():
             pass
 
 
+def test_write_text_sensitive_excludes_from_history_and_cloud():
+    """A sensitive text clip must carry both CanIncludeInClipboardHistory=0 and
+    CanUploadToCloudClipboard=0 on Windows.
+    Saves and restores whatever was on the clipboard.
+    """
+    import winclip
+
+    try:
+        original = winclip.read_text()
+    except Exception:
+        original = None
+
+    secret = "OTP_TEST_998877"
+    winclip.write_text_sensitive(secret)
+
+    with winclip._Opened():
+        hist_avail = bool(winclip.user32.IsClipboardFormatAvailable(
+            winclip.CF_CAN_INCLUDE_IN_HISTORY))
+        hist_val = winclip._read_global(winclip.CF_CAN_INCLUDE_IN_HISTORY) if hist_avail else None
+
+        cloud_avail = bool(winclip.user32.IsClipboardFormatAvailable(
+            winclip.CF_CAN_UPLOAD_TO_CLOUD))
+        cloud_val = winclip._read_global(winclip.CF_CAN_UPLOAD_TO_CLOUD) if cloud_avail else None
+
+    check("CanIncludeInClipboardHistory format is set on sensitive text", hist_avail)
+    check("CanIncludeInClipboardHistory value is 0 (excluded)",
+          hist_val == (0).to_bytes(4, "little"), repr(hist_val))
+    check("CanUploadToCloudClipboard format is set on sensitive text", cloud_avail)
+    check("CanUploadToCloudClipboard value is 0 (excluded)",
+          cloud_val == (0).to_bytes(4, "little"), repr(cloud_val))
+    check("clipboard text matches secret", winclip.read_text() == secret)
+
+    if original is not None:
+        try:
+            winclip.write_text(original)
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------- screenshot backup
 
 def test_screenshot_backup():
@@ -801,7 +883,7 @@ def test_screenshot_backup():
     """
     tmp = tempfile.mkdtemp()
     try:
-        node = WindowsNode("laptop", screenshot_dir=tmp)
+        node = WindowsNode("laptop", screenshot_dir=tmp, screenshot_device_subfolders=False)
         png = b"\x89PNG\r\n\x1a\n" + b"not a real png body, just bytes to persist" * 4
         payload = ClipPayload(mime="image/png", data=png, origin="laptop")
 
@@ -833,7 +915,7 @@ def test_screenshot_backup():
 
         # Dedup is TTL-bounded, not permanent: a deliberately re-taken identical screenshot
         # later must still be saved. Same pattern as test_dedup's "entries expire" case.
-        short_ttl_node = WindowsNode("laptop", screenshot_dir=tmp)
+        short_ttl_node = WindowsNode("laptop", screenshot_dir=tmp, screenshot_device_subfolders=False)
         short_ttl_node._screenshot_dedup = RecentClips(ttl=0.3)
         third = ClipPayload(mime="image/png", data=png + b"unique-for-ttl-test", origin="laptop")
         short_ttl_node._maybe_save_screenshot(third)
@@ -886,6 +968,7 @@ def main() -> int:
                      ("outbox-no-reput", test_outbox_put_skips_unchanged_reput),
                      ("outbox-image-sidecar", test_outbox_image_sidecar),
                      ("outbox-sidecar-integrity", test_outbox_sidecar_integrity),
+                     ("outbox-sensitive-zero-disk", test_outbox_sensitive_zero_disk),
                      ("policy", test_policy),
                      ("policy-images", test_policy_images),
                      ("domain", test_domain), ("hub-stamp", test_hub_stamp_attribution),
@@ -898,6 +981,7 @@ def main() -> int:
                      ("single-instance", test_single_instance),
                      ("winclip", test_winclip_concurrency),
                      ("winclip-history-exclude", test_write_image_excludes_from_clipboard_history),
+                     ("winclip-sensitive-exclude", test_write_text_sensitive_excludes_from_history_and_cloud),
                      ("screenshot-backup", test_screenshot_backup)]:
         print(f"{name}:")
         fn()

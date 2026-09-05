@@ -33,6 +33,11 @@ import winclip  # noqa: E402
 from copyclip import build_hub, build_push_listener, load_config, setup_logging  # noqa: E402
 from core.single_instance import AlreadyRunning, SingleInstance  # noqa: E402
 
+try:
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")
+except Exception:
+    pass
+
 log = logging.getLogger("copyclip.tray")
 
 user32 = winclip.user32

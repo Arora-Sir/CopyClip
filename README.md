@@ -211,15 +211,27 @@ script in this folder.
 | `max_image_bytes` | Oversized images are **skipped and logged**, never truncated — enforced on both the laptop and each device independently |
 | `screenshot_backup_dir` | Local folder every image clip (laptop-native or synced from a device) also gets saved into as a plain file, Windows'-own-naming-style (`Screenshot yyyy-MM-dd HHMMSS.png`). Empty string (default) disables it. A stopgap for a Windows 11 25H2 Snipping Tool bug — see [ARCHITECTURE.md §8](ARCHITECTURE.md#8-lessons-learned-this-session) |
 | `screenshot_backup_include_devices` | Whether `screenshot_backup_dir` also covers images arriving *from* the phone/tablet, not just ones captured on the laptop itself. Default `true` |
-| `screenshot_exclude_from_history` | Whether a device-synced image is excluded from Windows Clipboard History (Win+V) so it can't evict your other history entries. Default `true`. Ctrl+V still pastes it correctly either way — this only affects whether it's *listed* in Win+V. `false` brings back Win+V visibility for synced screenshots, at the cost of the eviction problem this exists to solve — see [bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md) |
+| `screenshot_exclude_from_history` | Whether a device-synced image is excluded from Windows Clipboard History (Win+V) so it can't evict your other history entries. Default `true`. Ctrl+V still pastes it correctly either way - this only affects whether it's *listed* in Win+V. `false` brings back Win+V visibility for synced screenshots, at the cost of the eviction problem this exists to solve - see [bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md) |
+| `allow_sensitive` | Whether clips flagged as sensitive by source apps (Android `EXTRA_IS_SENSITIVE`, e.g. Google Authenticator OTPs, Bitwarden/1Password passwords) are permitted to sync across the mesh. Default `false` (opt-in security gate) |
+| `sensitive_wipe_s` | Auto-wipe countdown in seconds (default `10.0`, configurable in dashboard or config). When a sensitive clip is synced, this timer automatically clears the clipboard across mesh nodes without leaving blank cards in Windows Clipboard History |
 
 Devices are addressed by **raw Tailscale IP, never MagicDNS**, which sidesteps NRPT
 resolution breaking.
 
-### Not syncing secrets
+### Sensitive Clips & Credential Protection
 
-Clips the source app flags with Android's `EXTRA_IS_SENSITIVE` (password managers do this)
-are **dropped, never transmitted**. For anything else:
+Apps like Google Authenticator, 1Password, Bitwarden, and Samsung Pass tag copied OTP codes
+and passwords with Android's `ClipDescription.EXTRA_IS_SENSITIVE`.
+
+- **Default Behavior (`"allow_sensitive": false`)**: Sensitive clips are dropped at the edge and
+  never transmitted across the network.
+- **Opt-in Sync (`"allow_sensitive": true`)**: Enables synchronization with multi-layer hardening:
+  - **Outbox Zero-Disk Guard**: Sensitive clips reside strictly in volatile RAM. They are never written to `outbox.json` on disk.
+  - **Windows Endpoint Hardening**: Synced with `CF_CAN_INCLUDE_IN_HISTORY = 0` (omitted from `Win+V`) and `CF_CAN_UPLOAD_TO_CLOUD = 0` (blocked from Microsoft Cloud Clipboard).
+  - **Clean Background Auto-Wipe**: After `sensitive_wipe_s` (default 10s), the clipboard is cleared via bare `EmptyClipboard()`, preventing empty white placeholder cards in `Win+V`.
+  - **Instant Supersession**: If any new clip is copied (non-sensitive text, another sensitive OTP, an image, or a local user copy) before the timer expires, the pending wipe is cancelled immediately.
+
+For anything else, static regex patterns block transmission:
 
 ```json
 "denylist_regex": ["BEGIN (RSA|OPENSSH) PRIVATE KEY", "^ghp_[A-Za-z0-9]{36}$"]
@@ -230,10 +242,14 @@ are **dropped, never transmitted**. For anything else:
 ## Tests
 
 ```bash
-python tests\test_core.py           # pure logic, no devices, under a second
-python tests\test_e2e.py            # laptop + phone, real daemon
-python tests\test_three_device.py   # all three, real daemon (devices must be unlocked)
+python tests\test_core.py             # pure logic, dedup, outbox, continuity (under a second)
+python tests\test_sensitive_sync.py   # sensitive sync, RAM outbox, clean wipe, supersession
+python tests\test_android_node.py     # AndroidNode protocol, chunked transfers, ACK/DEFER
+python tests\test_imaging.py          # PNG/DIBV5 image codecs, alpha preservation, 1080p speed
+python tests\test_e2e.py              # laptop + phone, real daemon
+python tests\test_three_device.py     # all three, real daemon (devices must be unlocked)
 ```
+
 
 `test_three_device.py` asserts the guarantees that matter: exactly one device written per
 laptop copy, exactly one application per device copy, no writes back into the originating

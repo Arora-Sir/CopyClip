@@ -211,19 +211,21 @@ One line per frame, `\n`-terminated, base64 for any payload. Defined authoritati
 `AndroidNode._handle()`.
 
 | Direction | Verb | Meaning |
-| :--- | :--- | :--- |
 | laptop → device | `SET <base64>` | Apply this content to the device's clipboard. |
+| laptop → device | `SETS <base64>` | Apply this sensitive content to the device's clipboard; arms the on-device auto-wipe timer. |
+| laptop → device | `CONF <base64>` | Push JSON runtime configuration to the on-device helper (`allow_sensitive`, `sensitive_wipe_s`). |
 | laptop → device | `GET` | Send the current clip's full content. |
-| laptop → device | `DESC` | Send metadata only (mime, sensitive flag, timestamp, hash, length) — never the body. |
+| laptop → device | `DESC` | Send metadata only (mime, sensitive flag, timestamp, hash, length) - never the body. |
 | laptop → device | `MODE stamp` / `MODE full` | Standby (announce timestamps only, never read content) vs representative (read content to produce hashes). |
 | laptop → device | `PING` | Liveness probe; answered with `PONG`. |
 | laptop → device | `QUIT` | Clean shutdown. |
 | device → laptop | `READY <sdk>` | Greeting once the helper has a working binder handle. |
+| device → laptop | `ACK <verb>` | Confirms a `SET`, `SETS`, `CONF`, or `MODE` actually completed. |
 | device → laptop | `CLIP <mime> <sens> <b64>` | Full clip content, in response to `GET` or when in full mode and something genuinely new appeared. |
 | device → laptop | `DESC <mime> <sens> <ts> <sha> <len>` | Metadata-only announcement. |
-| device → laptop | `STAMP <ts>` | "Something changed" with no content — used in standby mode, and by the own-write-echo suppression. |
-| device → laptop | `ACK <verb>` | Confirms a `SET` or `MODE` actually completed. |
-| device → laptop | `DEFER <verb> <reason>` | The command was accepted but can't apply right now (device locked) — will replay itself. |
+| device → laptop | `STAMP <ts>` | "Something changed" with no content - used in standby mode, and by the own-write-echo suppression. |
+| device → laptop | `DEFER <verb> <reason>` | The command was accepted but can't apply right now (device locked) - will replay itself. |
+
 | device → laptop | `LOCK <0\|1>` | Lock-state change. |
 | device → laptop | `SKIP <mime> <why>` | Something was deliberately not read/sent. |
 | device → laptop | `PONG` | Answers `PING`. |
@@ -619,7 +621,11 @@ reason — changing one is a real tradeoff, not a free lunch.
 | `screenshot_backup_include_devices` | `true` | Whether `screenshot_backup_dir` also covers images synced in *from* the phone/tablet, not just laptop-native ones | `false` limits the backup to laptop screenshots only |
 | `screenshot_exclude_from_history` | `true` | Whether a device-synced image is written with `CanIncludeInClipboardHistory=0`, excluding it from Windows Clipboard History/Win+V (§8, "Two entries in Windows Clipboard History") | `false` lets synced screenshots appear in Win+V again, at the cost of the eviction-of-other-entries issue that motivated this flag in the first place (`bugs/BUG-005`) |
 
+| `allow_sensitive` | `false` | Whether clips tagged sensitive (Android `EXTRA_IS_SENSITIVE`) are allowed to sync (§9.1) | Defaults `false` for defense-in-depth; when `true`, sensitive clips sync with RAM-only outbox, Win+V exclusion, and clean auto-wipe |
+| `sensitive_wipe_s` | `10.0` | How long in seconds before a synced sensitive clip is wiped from the clipboard (§9.1) | Lower = smaller window of credential exposure on the clipboard; higher = more time to paste into a 2FA prompt |
+
 ---
+
 
 ## 8. Lessons learned this session
 
@@ -889,7 +895,61 @@ guard (outside this repo, confirmed already present) skips the restart entirely 
 single healthy instance is already running. Full writeup:
 `bugs/BUG-008-restart-drops-baseline.md`.
 
+**(2026-09-05) Google Authenticator and credential manager clips dropped at edge policy.**
+*Symptom:* Copying a code in Google Authenticator on Android didn't sync automatically to the
+laptop or Pixel, but copying the code a second time from the phone's Samsung clipboard history
+tray synced immediately. *Investigated because:* the user reported the asymmetry during live
+usage. *Root cause:* Google Authenticator (and 1Password, Bitwarden, Samsung Pass) attaches
+`PersistableBundle` extra `android.content.extra.IS_SENSITIVE` on Android 13+. `ClipBridge.java`
+faithfully detected this extra and flagged the descriptor as `sensitive=true`. `core/policy.py`
+unconditionally dropped sensitive clips by design (`allow_sensitive` was not configurable). When
+re-copied from the Samsung clipboard history tray or edge panel, Samsung's UI created a fresh
+`ClipData` object that omitted the source app's `PersistableBundle` extra, making `isSensitive`
+false on the second copy. *Fix:* Added `"allow_sensitive": true` configuration, wire protocol
+`CONF`/`SETS`, outbox volatile RAM-only guard (`self._sensitive_entries` never written to disk),
+Windows endpoint hardening (`CF_CAN_INCLUDE_IN_HISTORY=0`, `CF_CAN_UPLOAD_TO_CLOUD=0`), and clean
+auto-wipe (§9.1). Full writeup: `bugs/BUG-013-sensitive-clip-sync-winv-blank-tile-and-timer-race.md`.
+
+**(2026-09-05) Sensitive auto-wipe left an empty white card in Windows Clipboard History (Win+V).**
+*Symptom:* After the auto-wipe countdown (10s) expired on Windows, pressing `Win+V` displayed an
+empty white rectangle card at the top of the history list. *Root cause:* `_wipe_sensitive()` in
+`nodes/windows_node.py` called `winclip.write_text("")`. `write_text` sets `CF_UNICODETEXT` with
+a null terminator (`b"\x00\x00"`). Windows Clipboard History monitors format updates and adds a
+history card for every `SetClipboardData()` invocation that registers data, even an empty string.
+*Fix:* Added `winclip.clear_clipboard()` which calls Win32 `user32.EmptyClipboard()` inside an
+open/close cycle without calling `SetClipboardData()` for any format. Windows Clipboard History
+ignores bare `EmptyClipboard()` calls, completely wiping the clipboard without creating any
+history entry. Stamped `_own_write_seq` to the returned sequence number to suppress watcher echo.
+
+**(2026-09-05) Sensitive auto-wipe timer wiped superseding non-sensitive clips or images.**
+*Symptom:* If user copied an OTP (arming a 10s auto-wipe countdown) and then immediately copied
+normal text or an image, the pending timer was not cancelled; when the timer expired, it wiped
+the user's new content. *Root cause:* `write()` in `nodes/windows_node.py` only cancelled
+`_wipe_timer` when another sensitive clip arrived; non-sensitive writes, image writes, and local
+user copies in `_on_change()` left the timer running. On Android, `doSet()`, `doSetImage()`, and
+the poll loop similarly did not cancel `pendingWipeFuture`. *Fix:* Implemented multi-path timer
+supersession across Windows and Android write paths and local change watchers.
+
+**(2026-09-05) Taskbar feather icon appearing instead of CopyClip custom icon.**
+*Symptom:* CopyClip's taskbar icon intermittently showed as a red/blue feather instead of the
+CopyClip icon. *Root cause:* Tkinter's default window class icon is the feather
+(`wish.exe`/`tk86t.dll`). `SetCurrentProcessExplicitAppUserModelID` was called after Shell/Tkinter
+initialization. Additionally, Tkinter's `root.winfo_id()` only resolves the inner client widget,
+not the top-level DWM window manager frame (`root.wm_frame()`). *Fix:* Stamped
+`SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")` early on module import and main()
+before Tk initialization in `copyclip.py`, `tray.py`, and `dashboard.py`. Sent `WM_SETICON`
+(`ICON_BIG` and `ICON_SMALL`) to `wm_frame()`, `GetParent()`, and `winfo_id()`.
+
+**(2026-09-05) Dashboard reported "1 Outbox Queued" when mesh was fully synchronized.**
+*Symptom:* Dashboard status showed "1 Outbox Queued" permanently in amber warning text even though
+all 3 devices were online and syncing cleanly. *Root cause:* Dashboard was reading
+`hub.stats["queued"]`, which is a cumulative lifetime counter incremented every time any clip is
+enqueued; it is never decremented when items drain. *Fix:* Switched dashboard refresh to read
+`active_queued = len(status.get("outbox", []))`, switching dynamically between amber warning (>0)
+and muted grey (0).
+
 ---
+
 
 ## 9. Security & trust model
 
@@ -941,13 +1001,50 @@ entirely. adb's key-authorization step still gates any actual shell access from 
 this is an Android/adb-level exposure CopyClip depends on and doesn't verify or harden.
 
 **Bottom line:** on a home network, a device that is neither a tailnet member nor already
-adb-authorized to your phone/tablet cannot read or inject your clips — but if you ever add a
+adb-authorized to your phone/tablet cannot read or inject your clips - but if you ever add a
 device to the tailnet, or authorize a new adb key, that device inherits full clipboard
 access with zero further gate from CopyClip itself.
+
+### 9.1 Sensitive clips & credential protection (EXTRA_IS_SENSITIVE)
+
+Android 13+ introduced `ClipDescription.EXTRA_IS_SENSITIVE` (`android.content.extra.IS_SENSITIVE`),
+allowing password managers, 2FA authenticators (such as Google Authenticator), and banking apps
+to explicitly flag copied credentials. By default, CopyClip drops these clips at the ingestion
+edge (`core/policy.py`). When opted into via `"allow_sensitive": true`, CopyClip enforces a
+hardened lifecycle end-to-end:
+
+1. **Detection & Wire Protocol**:
+   - `android/ClipBridge.java` inspects `desc.getExtras().getBoolean("android.content.extra.IS_SENSITIVE", false)`.
+   - On connection and configuration hot-reload, the laptop sends `CONF <base64>` carrying
+     `{"allow_sensitive": bool, "sensitive_wipe_s": int}`.
+   - When sensitive sync is permitted, `AndroidNode` emits `ClipPayload(..., sensitive=True)` and
+     writes to Android via the dedicated `SETS <base64>` command verb.
+2. **Outbox Zero-Disk Guard**:
+   - If a target device is locked or temporarily unreachable, `core/outbox.py` stores sensitive
+     payloads exclusively in volatile process memory (`self._sensitive_entries`).
+   - Sensitive clips are strictly filtered out before writing `outbox.json` to disk. If the daemon
+     terminates or crashes, sensitive clips evaporate with zero disk footprint.
+3. **Windows Endpoint Hardening**:
+   - In `winclip.py`, `write_text_sensitive()` registers two Windows Clipboard metadata formats:
+     `CanIncludeInClipboardHistory = 0` (omits the clip from `Win+V`) and
+     `CanUploadToCloudClipboard = 0` (prevents Microsoft Cloud Clipboard synchronization).
+4. **Clean Background Auto-Wipe**:
+   - Both Windows (`nodes/windows_node.py`) and Android (`android/ClipBridge.java`) arm an
+     asynchronous countdown for `sensitive_wipe_s` seconds (default 10s, configurable).
+   - On Windows, `winclip.clear_clipboard()` calls Win32 `EmptyClipboard()` directly without
+     setting any format data. Because Windows Clipboard History only records entries when format
+     data is set, this completely clears the active clipboard without creating a blank white card
+     in `Win+V`.
+   - The wipe immediately stamps `_own_write_seq` to suppress echo notifications.
+5. **Instant Timer Supersession**:
+   - If any new clip arrives (non-sensitive text, another sensitive OTP, an image, or a local copy
+     by the user) before the countdown finishes, the pending wipe timer is cancelled immediately.
+     Legitimate non-sensitive content is never wiped by a stale timer.
 
 ---
 
 ## 10. Logging & debugging
+
 
 - Logs live in `logs/copyclip.log` (rotated at 2 MB, 3 backups kept — bounded disk use), set
   up in `copyclip.py`'s `setup_logging()`. Both `logs/` and `state/` are gitignored — nothing
@@ -981,10 +1078,11 @@ access with zero further gate from CopyClip itself.
 ## 11. File map
 
 See README's [Layout](README.md#layout) table for the quick version. The one addition worth
-calling out here: **`tests/`** — `test_core.py` is pure routing/dedup/outbox logic, no
-devices, runs in under a second; `test_android_node.py` covers the ACK-confirmation logic
-with a fake transport, also fast; `test_e2e.py`/`test_three_device.py` need real, unlocked
-hardware.
+calling out here: **`tests/`** - `test_core.py` is pure routing/dedup/outbox logic;
+`test_sensitive_sync.py` covers sensitive sync, RAM outbox, clean wipe, and timer supersession;
+`test_android_node.py` covers the ACK-confirmation and chunked transfer logic with a fake transport;
+`test_imaging.py` tests PNG/DIBV5 codecs; `test_e2e.py`/`test_three_device.py` need real hardware.
+
 
 ---
 
