@@ -592,6 +592,29 @@ On Samsung devices with Secure Folder enabled (profile id=150), `dumpsys trust` 
 **4. Remote DEX Cache Verification on Wire Transport:**
 Before executing `adb push`, `AdbTransport._push_dex()` issues `adb shell stat -c %s /data/local/tmp/clipbridge.dex`. If the remote byte count matches the local DEX file (31,452 bytes), the upload is skipped, saving 300 to 500 ms during connection re-establishment and eliminating flash wear.
 
+### 6.6e Samsung Long Screenshot (Scroll Capture) Bounded Re-Arm (2026-09-17)
+
+`checkScreenshots()`'s filename-only novelty check (6.6d's `lastDirMtimes` cache sits in
+front of it, unaffected by this) is correct for an ordinary screenshot, but Samsung's scroll
+capture (screenshot inside an app, then "Capture more" repeatedly to extend it) finalizes by
+overwriting that SAME filename with the full stitched image, seconds after the initial
+single-page shot. Measured directly on this hardware (`bugs/BUG-014`, pure filesystem
+observation with no daemon running): the same-filename overwrite landed 8s and 22s after the
+initial shot across two real captures, always as a clean jump between polls, never
+incremental growth. Once a filename was marked synced, it was never looked at again, so the
+initial partial shot synced and the real final image was silently dropped forever.
+
+The fix adds a bounded re-arm window, `SCREENSHOT_REARM_WINDOW_MS` (45s, anchored to first
+sync and never renewed): a synced filename that grows again within that window is re-read
+and re-sent through the normal path. Gated on length only, never mtime, so BUG-005's fix
+still holds inside the window. A short stability gate, `SCREENSHOT_STABILITY_TICKS` (2
+consecutive 150ms polls at the same length), guards `isCompleteImage()`'s verdict against a
+still-being-written file whose trailing bytes coincidentally look terminated; not the actual
+mechanism measured here, kept as cheap defense-in-depth. Accepted tradeoff: since the initial
+shot can't be distinguished in advance from an eventual long screenshot, it still syncs
+immediately as before, so a long-screenshot session lands as two synced images (and two
+`screenshot_backup_dir` files) rather than one.
+
 ---
 
 ## 7. Tuning knobs
@@ -610,11 +633,13 @@ reason — changing one is a real tradeoff, not a free lunch.
 | `tick_s` | 2.0 (hardcoded in `core/hub.py`) | How often the hub retries the outbox and re-checks domain health | Rarely worth changing |
 | `IDLE_ORPHAN_MS` | 100,000 (hardcoded in `android/ClipBridge.java`) | How long `ClipBridge` can go without hearing from the laptop before suppressing content reads (§6.6) | Must stay comfortably above `idle_ping_s` + its grace window or a healthy-but-quiet connection will falsely trip it |
 | `IMAGE_DESC_HOLD_MS` | 4,500 (hardcoded in `android/ClipBridge.java`) | How long an ordinary clipboard-sourced image is held before being announced, so a real screenshot file push (in either order) can supersede it (§6.6b, `bugs/BUG-006`) | Lower = less delay on a genuine standalone image copy, but less time for a slow screenshot-folder poll tick to catch up; higher = safer against the race, more delay, and a bigger window where two genuinely distinct rapid image copies could collapse into one |
+| `SCREENSHOT_REARM_WINDOW_MS` | 45,000 (hardcoded in `android/ClipBridge.java`) | How long after first syncing a screenshot filename it stays worth re-checking for growth, so a Samsung long screenshot's same-filename overwrite still gets caught (§6.6e, `bugs/BUG-014`) | Lower = less idle stat-checking per screenshot, but risks missing a long screenshot that takes longer than the window to finish stitching; higher = more margin, at the cost of a few more `File.length()` calls per screenshot |
+| `SCREENSHOT_STABILITY_TICKS` | 2 (hardcoded in `android/ClipBridge.java`) | Consecutive 150ms polls at the same file length required before trusting `isCompleteImage()`'s verdict (§6.6e, `bugs/BUG-014`) | Higher = more resistant to a still-being-written file that coincidentally looks terminated, at the cost of a little extra latency on every screenshot |
 | `POLL_MS` | 250 (hardcoded in `android/ClipBridge.java`) | Polling period while device is active and unlocked (§6.6) | 4 ticks/sec ensures sub-300ms clipboard detection with minimal battery footprint |
 | `POLL_MS_LOCKED` | 1,500 (hardcoded in `android/ClipBridge.java`) | Polling period while keyguard is active (§6.6d, `bugs/BUG-012`) | 83% reduction in wakeups and Binder IPC while device is locked; resets immediately to 250ms on unlock |
 | `grace_s` (per domain) | 8.0 | How long a Continuity confirmation probe is given before counting as a miss (§6.5) | Above Samsung's measured ~2.5s relay by a wide margin |
 | `fail_threshold` (per domain) | 3 | Consecutive missed confirmations before a domain is marked degraded (§6.5) | Lower = faster fallback to direct writes, more sensitive to one-off blips |
-| `allow_images` | `false` | Whether image clips sync at all (§6.6a) | Defaults off pending real-use confirmation of bugs/SPIKE-IMAGE-CLIPBOARD.md's open Q5/Q7; flip once confirmed |
+| `allow_images` | `true` | Whether image clips sync at all (§6.6a) | Defaults on: real-use confirmation of bugs/SPIKE-IMAGE-CLIPBOARD.md's open Q5/Q7 is complete |
 | `max_image_bytes` | 25,165,824 (24 MiB) | Oversize images are **skipped and logged**, never truncated — enforced independently on the laptop (`core/policy.py`) and on each device (`ClipBridge.java`'s own `MAX_IMAGE_BYTES`) | Higher = larger screenshots sync, more memory pressure per transfer on both ends |
 | `image_chunk_bytes` | 49,152 (48 KiB) | Raw bytes per chunk in the `SETB`/`SETC` framing (§6.7a) | Smaller = more `ACK setc` round trips, faster stall detection on a shaky link; larger = fewer round trips, coarser stall detection |
 | `screenshot_backup_dir` | `""` (off) | Local folder every image clip also gets saved into as a plain file (§8, "Two entries in Windows Clipboard History") | Empty disables it entirely; a stopgap for a Windows bug, meant to be removed once Microsoft fixes it |

@@ -1197,6 +1197,26 @@ public final class ClipBridge {
     private static File cachedNewestScreenshot = null;
 
     private static String lastScreenshotName;
+    // BUG-014: when lastScreenshotName was first synced (ms) and how many bytes were last
+    // observed for it, so a same-filename overwrite (Samsung's scroll capture finalizes a
+    // long screenshot by rewriting the SAME path with the full stitched image, seconds after
+    // the initial single-page shot, measured directly on this hardware, see
+    // bugs/BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md) can still be
+    // caught within a bounded follow-up window, instead of that filename being ignored
+    // forever once first seen.
+    private static long lastScreenshotFirstSyncMs = 0L;
+    private static long lastScreenshotLastSyncedLen = -1L;
+    // Measured directly on an S24 Ultra (BUG-014): the same-filename overwrite from a
+    // single-page shot to the final stitched long screenshot landed 8s and 22s after the
+    // initial shot, across two real captures. Set with margin above that. Anchored to the
+    // FIRST sync of a filename and never renewed by a later re-check, so the total extra
+    // watch time per screenshot is capped regardless of how many times the user extends it.
+    private static final long SCREENSHOT_REARM_WINDOW_MS = 45_000L;
+    // How many consecutive 150ms polls must see the same file length before
+    // readCompleteScreenshotFile() trusts a positive isCompleteImage() verdict. Defends
+    // against a still-being-written file whose currently-written trailing bytes happen to
+    // look like a valid terminator purely by chance.
+    private static final int SCREENSHOT_STABILITY_TICKS = 2;
 
     // Recently-pushed screenshot hashes, so a rare case where Samsung's own screenshot flow
     // produces two on-disk files for one real capture (different filenames -- e.g. a
@@ -1265,6 +1285,12 @@ public final class ClipBridge {
             // screenshots taken during a reconnect or app start from being lost.
             if (ageMs >= 90_000L) {
                 lastScreenshotName = newest.getName();
+                // BUG-014: seed the re-arm tracking so this silently-adopted baseline is
+                // immediately treated as past its window (0 is always more than
+                // SCREENSHOT_REARM_WINDOW_MS ms in the past) and never re-checked, same as
+                // this baseline was never treated as "new" before this fix.
+                lastScreenshotFirstSyncMs = 0L;
+                lastScreenshotLastSyncedLen = newest.length();
             }
         }
     }
@@ -1319,8 +1345,25 @@ public final class ClipBridge {
             if (newest == null) {
                 return;
             }
-            if (lastScreenshotName != null && newest.getName().equals(lastScreenshotName)) {
-                return;
+            boolean sameName = lastScreenshotName != null && newest.getName().equals(lastScreenshotName);
+            if (sameName) {
+                // BUG-014: a synced filename stays worth re-checking for a bounded window
+                // after its first sync, since Samsung's scroll capture finalizes a long
+                // screenshot by overwriting the SAME path with the full stitched image,
+                // seconds after the initial single-page shot (measured directly, see
+                // bugs/BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md).
+                // Gated on length, never on mtime alone, so BUG-005's fix (a background
+                // process re-touching identical bytes must never re-trigger a resync) still
+                // holds inside this window.
+                long now = System.currentTimeMillis();
+                if (now - lastScreenshotFirstSyncMs > SCREENSHOT_REARM_WINDOW_MS) {
+                    return; // window elapsed, filename fully retired, same as before this fix
+                }
+                if (newest.length() == lastScreenshotLastSyncedLen) {
+                    return; // no growth since last look, nothing to do
+                }
+                // Falls through: same filename, still inside the window, and it grew, so
+                // re-run it through the same read-and-send path as a fresh file below.
             }
             // Read only when file write is 100% complete. If still writing, do NOT advance
             // lastScreenshotName so the next poll will pick it up as soon as it finishes.
@@ -1328,12 +1371,22 @@ public final class ClipBridge {
             if (raw == null || raw.length <= 0) {
                 // If it timed out after 8s and still is not a valid complete image,
                 // advance lastScreenshotName so we don't spin in an infinite 8-second
-                // blocking loop on every poll tick, starving the main thread.
+                // blocking loop on every poll tick, starving the main thread. Only seed the
+                // re-arm window on a genuinely new filename, never on a re-check of an
+                // existing one, so the window can't be extended indefinitely.
                 lastScreenshotName = newest.getName();
+                if (!sameName) {
+                    lastScreenshotFirstSyncMs = System.currentTimeMillis();
+                }
+                lastScreenshotLastSyncedLen = newest.length();
                 emit("SKIP image/unknown screenshot-incomplete-or-unsupported: " + newest.getName());
                 return;
             }
+            if (!sameName) {
+                lastScreenshotFirstSyncMs = System.currentTimeMillis();
+            }
             lastScreenshotName = newest.getName();
+            lastScreenshotLastSyncedLen = raw.length;
             emitScreenshot(raw, newest.getName());
         } catch (Throwable t) {
             emit("ERR screenshot: " + describe(t));
@@ -1408,16 +1461,30 @@ public final class ClipBridge {
 
     private static byte[] readCompleteScreenshotFile(File file) {
         long deadline = System.currentTimeMillis() + 8000L; // Allow up to 8s for slow flash write
+        long previousLen = -1L;
+        int stableTicks = 0;
         while (System.currentTimeMillis() < deadline) {
             long currentLen = file.length();
             if (currentLen > 100) {
-                try (InputStream is = new FileInputStream(file)) {
-                    byte[] raw = readAllBounded(is, MAX_IMAGE_BYTES);
-                    if (isCompleteImage(raw)) {
-                        return raw;
+                stableTicks = (currentLen == previousLen) ? stableTicks + 1 : 1;
+                previousLen = currentLen;
+                // BUG-014: require the length to also be unchanged since the previous poll
+                // before trusting isCompleteImage()'s verdict. A file still being written
+                // can, purely by chance, have currently-written trailing bytes that look
+                // like a valid terminator; requiring one quiet tick first means that
+                // coincidence would have to survive a second read to be accepted.
+                if (stableTicks >= SCREENSHOT_STABILITY_TICKS) {
+                    try (InputStream is = new FileInputStream(file)) {
+                        byte[] raw = readAllBounded(is, MAX_IMAGE_BYTES);
+                        if (isCompleteImage(raw)) {
+                            return raw;
+                        }
+                    } catch (Exception ignored) {
                     }
-                } catch (Exception ignored) {
                 }
+            } else {
+                previousLen = -1L;
+                stableTicks = 0;
             }
             try {
                 Thread.sleep(150);

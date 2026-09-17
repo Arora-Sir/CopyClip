@@ -207,7 +207,7 @@ script in this folder.
 | `dedup_ttl_s` | How long a clip is remembered. Longer than Samsung's ~2.5 s relay, short enough that deliberately re-copying works |
 | `denylist_regex` | Clips matching any pattern are never synced |
 | `ack_timeout_s` | How long a write waits for the device's real `ACK`/`DEFER` reply before being treated as failed. A successful local pipe write is not proof the device received it; this is what actually confirms delivery. See [ARCHITECTURE.md §6.3](ARCHITECTURE.md#63-ack-confirmed-writes) |
-| `allow_images` | Whether image clips sync at all. Defaults `false` pending real-use confirmation — see [ARCHITECTURE.md §6.6a](ARCHITECTURE.md#66a-image-clipboard-mediastore-under-app_process-and-why-it-needed-fakecontext) |
+| `allow_images` | Whether image clips sync at all. Defaults `true`: real-use confirmation is complete, see [ARCHITECTURE.md §6.6a](ARCHITECTURE.md#66a-image-clipboard-mediastore-under-app_process-and-why-it-needed-fakecontext) |
 | `max_image_bytes` | Oversized images are **skipped and logged**, never truncated — enforced on both the laptop and each device independently |
 | `screenshot_backup_dir` | Local folder every image clip (laptop-native or synced from a device) also gets saved into as a plain file, Windows'-own-naming-style (`Screenshot yyyy-MM-dd HHMMSS.png`). Empty string (default) disables it. A stopgap for a Windows 11 25H2 Snipping Tool bug — see [ARCHITECTURE.md §8](ARCHITECTURE.md#8-lessons-learned-this-session) |
 | `screenshot_backup_include_devices` | Whether `screenshot_backup_dir` also covers images arriving *from* the phone/tablet, not just ones captured on the laptop itself. Default `true` |
@@ -324,14 +324,20 @@ double-click `Start CopyClip (Debug).bat` for the same thing without typing the 
 
 ## Images
 
-Copy an image on any device, paste it on any other — same mechanism as text, off by default.
-`allow_images` in `config.json` is `false` until real-use confirmation of two open questions
-from the pre-implementation device spike (see
-[bugs/SPIKE-IMAGE-CLIPBOARD.md](bugs/SPIKE-IMAGE-CLIPBOARD.md) and
-[ARCHITECTURE.md §6.6a](ARCHITECTURE.md#66a-image-clipboard-mediastore-under-app_process-and-why-it-needed-fakecontext)).
-PNG/JPEG/GIF/BMP/WEBP travel byte-for-byte; only HEIC/HEIF/AVIF transcode to PNG. Images are
-stored on-device under `Pictures/CopyClip` via MediaStore, and capped at `max_image_bytes`
-(default 24 MiB), skipped and logged rather than truncated if oversized.
+Copy an image on any device, paste it on any other, same mechanism as text. `allow_images`
+in `config.json` is `true` by default: the two open questions from the pre-implementation
+device spike (see [bugs/SPIKE-IMAGE-CLIPBOARD.md](bugs/SPIKE-IMAGE-CLIPBOARD.md) and
+[ARCHITECTURE.md §6.6a](ARCHITECTURE.md#66a-image-clipboard-mediastore-under-app_process-and-why-it-needed-fakecontext))
+were confirmed in real use. PNG/JPEG/GIF/BMP/WEBP travel byte-for-byte; only HEIC/HEIF/AVIF
+transcode to PNG. Images are stored on-device under `Pictures/CopyClip` via MediaStore, and
+capped at `max_image_bytes` (default 24 MiB), skipped and logged rather than truncated if
+oversized.
+
+Samsung's long screenshot (scroll capture) is supported: the initial single-page shot syncs
+immediately, and the full stitched image syncs again once Samsung finishes writing it, up to
+45 seconds later. Expect two synced images and two backup-folder files per long-screenshot
+session, not one (see
+[bugs/BUG-014](bugs/BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md)).
 
 The laptop side has a counterpart: `screenshot_backup_dir` saves every image clip (local or
 synced from a device) as a plain file too, same idea as the Android `Pictures/CopyClip`

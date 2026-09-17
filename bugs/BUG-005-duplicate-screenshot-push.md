@@ -123,6 +123,14 @@ real capture (e.g. a scrolling/long-screenshot preview-then-final pair, or an "e
 under a new name) — different filenames, so the fix above sees two genuinely "new"
 screenshots.
 
+**Update (BUG-014, 2026-09-17):** measured directly for the scrolling/long-screenshot case
+specifically, and it does not use a different filename. Samsung's scroll capture overwrites
+the SAME filename with the final stitched image, seconds after the initial single-page shot.
+The different-filename theory above may still hold for the "edit" save case, which was not
+separately measured, but it is not what scroll capture does. See
+`bugs/BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md` for the actual fix,
+which is a bounded re-arm window on the SAME filename, not a different-filename dedup.
+
 **Second fix, layered on top, not a replacement:** a small content-hash dedup in
 `emitScreenshot()`, the Java-side equivalent of what `nodes/windows_node.py`'s
 `_maybe_save_screenshot()` already does on the laptop (`core/dedup.py`'s `RecentClips`,
