@@ -310,7 +310,7 @@ falls back to writing every reachable member directly, because at that point not
 relaying on its behalf. It recovers back to "healthy" the moment a confirmation succeeds
 again.
 
-**Standalone Mesh and Coexistence Architecture (2026-10-02):** The `"samsung"` domain was emptied in `config.json` (`"domains": []`). In this topology, CopyClip treats the laptop, S24 Ultra, and Tab S10 Ultra as independent standalone peer nodes, delivering writes directly across the entire mesh over Wi-Fi and Tailscale. When Samsung Continuity is also active on the mobile devices (`mcf_continuity = 1` for offline phone-to-tablet sync without laptop), CopyClip's per-hash deduplication engine in `core/dedup.py` drops duplicate echoes from the Samsung relay, preventing reflection storms, double-queueing, or infinite loops.
+**Samsung Domain and Coexistence Architecture:** The `"samsung"` domain groups the S24 Ultra and Tab S10 Ultra. CopyClip writes to one representative member and verifies that Samsung Continuity propagates the clip to the other within `grace_s`. If Continuity is disabled or fails to propagate 3 consecutive times, CopyClip automatically marks the domain degraded and falls back to writing directly to both devices. If the domain is removed entirely (`"domains": []`), CopyClip treats all devices as standalone peers with direct writes. When Samsung Continuity is active (`mcf_continuity = 1`), CopyClip's per-hash deduplication engine in `core/dedup.py` drops duplicate echoes from the Samsung relay, preventing reflection storms, double-queueing, or infinite loops.
 
 ### 6.6a Image clipboard: MediaStore under app_process, and why it needed FakeContext
 
