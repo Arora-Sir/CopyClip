@@ -107,6 +107,14 @@ def test_dedup():
           d.should_deliver(sha, "phone") is False,
           "v1's single last_hash would have been overwritten here")
 
+    # Coexistence collision test: what if Samsung Continuity is accidentally re-enabled?
+    # Both phone and tab observe the exact same clip within milliseconds.
+    coexist_sha = ClipPayload.from_text("collision-test", origin="phone").sha256
+    d.observe(coexist_sha, "phone")
+    check("continuity echo on tab is recognized as non-novel", d.observe(coexist_sha, "tab") is False)
+    check("phone does not receive echo write", d.should_deliver(coexist_sha, "phone") is False)
+    check("tab does not receive echo write", d.should_deliver(coexist_sha, "tab") is False)
+
     expiring = RecentClips(ttl=0.3)
     expiring.observe(sha, "phone")
     time.sleep(0.45)

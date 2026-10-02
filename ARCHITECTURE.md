@@ -302,13 +302,15 @@ for a re-confirmation nobody has any reason to send again.
 ### 6.5 Continuity health tracking
 
 After a representative write, the hub arms a short-lived "probe": if the *other* domain
-member reports the same content hash within `grace_s` (8 seconds — comfortably above
+member reports the same content hash within `grace_s` (8 seconds, comfortably above
 Samsung's measured ~2.5s relay time), that's proof Continuity is actually propagating right
 now, and CopyClip keeps writing to just the one representative. If that confirmation is
 missed `fail_threshold` (3) times in a row, the domain is marked **degraded**, and CopyClip
-falls back to writing every reachable member directly — because at that point nothing is
+falls back to writing every reachable member directly, because at that point nothing is
 relaying on its behalf. It recovers back to "healthy" the moment a confirmation succeeds
 again.
+
+**Standalone Mesh and Coexistence Architecture (2026-10-02):** The `"samsung"` domain was emptied in `config.json` (`"domains": []`). In this topology, CopyClip treats the laptop, S24 Ultra, and Tab S10 Ultra as independent standalone peer nodes, delivering writes directly across the entire mesh over Wi-Fi and Tailscale. When Samsung Continuity is also active on the mobile devices (`mcf_continuity = 1` for offline phone-to-tablet sync without laptop), CopyClip's per-hash deduplication engine in `core/dedup.py` drops duplicate echoes from the Samsung relay, preventing reflection storms, double-queueing, or infinite loops.
 
 ### 6.6a Image clipboard: MediaStore under app_process, and why it needed FakeContext
 
