@@ -83,13 +83,8 @@ row and it starts writing to both devices directly until propagation recovers.
 
 ### 3. What actually keeps a third party from reading or injecting your clips
 
-Tailscale (WireGuard) and adb's own key-authorization are what protect this in transit —
-not anything CopyClip's own wire protocol adds. The laptop never listens on a socket, so
-nothing can connect *to* it; both devices are addressed by fixed Tailscale IP; and anyone
-who isn't already a member of your tailnet or an authorized adb key holder for your phone/
-tablet is not on the path at all. Full detail, including what CopyClip's protocol does
-*not* add on top of that:
-[ARCHITECTURE.md §9](ARCHITECTURE.md#9-security--trust-model).
+Tailscale WireGuard and ADB key authorization protect clipboard traffic in transit. Devices are addressed strictly by fixed Tailscale IP. High-speed direct streaming sockets require mutual HMAC-SHA256 authentication against the shared key before processing any bytes. A device that is not an authorized member of your private tailnet cannot route packets to the sync endpoints. Full detail on the security architecture:
+[ARCHITECTURE.md §9](ARCHITECTURE.md#9-security: trust-model).
 
 ---
 
@@ -201,17 +196,19 @@ script in this folder.
 | Key | Meaning |
 | :--- | :--- |
 | `devices[]` | `name`, `transport` (`adb` or `tcp`), `device` (Tailscale IP and port), `enabled` |
-| `domains[]` | Devices that mirror each other by themselves. `grace_s` is how long Continuity gets before a probe counts as missed; `fail_threshold` misses flips to direct writes |
+| `domains[]` | Devices that mirror each other by themselves. `grace_s` is how long Continuity gets before a probe counts as missed. Accumulating `fail_threshold` consecutive misses triggers direct writes |
 | `max_chars` | Oversized clips are **skipped and logged**, never truncated |
 | `adopt_on_connect` | `false` stops a reconnect from overwriting what you just copied on the laptop with a device's older clip |
 | `dedup_ttl_s` | How long a clip is remembered. Longer than Samsung's ~2.5 s relay, short enough that deliberately re-copying works |
 | `denylist_regex` | Clips matching any pattern are never synced |
-| `ack_timeout_s` | How long a write waits for the device's real `ACK`/`DEFER` reply before being treated as failed. A successful local pipe write is not proof the device received it; this is what actually confirms delivery. See [ARCHITECTURE.md §6.3](ARCHITECTURE.md#63-ack-confirmed-writes) |
+| `ack_timeout_s` | How long a write waits for the device's real `ACK`/`DEFER` reply before being treated as failed. A successful local pipe write is not proof the device received it. An explicit ACK confirms actual delivery. See [ARCHITECTURE.md §6.3](ARCHITECTURE.md#63-ack-confirmed-writes) |
 | `allow_images` | Whether image clips sync at all. Defaults `true`: real-use confirmation is complete, see [ARCHITECTURE.md §6.6a](ARCHITECTURE.md#66a-image-clipboard-mediastore-under-app_process-and-why-it-needed-fakecontext) |
-| `max_image_bytes` | Oversized images are **skipped and logged**, never truncated — enforced on both the laptop and each device independently |
-| `screenshot_backup_dir` | Local folder every image clip (laptop-native or synced from a device) also gets saved into as a plain file, Windows'-own-naming-style (`Screenshot yyyy-MM-dd HHMMSS.png`). Empty string (default) disables it. A stopgap for a Windows 11 25H2 Snipping Tool bug — see [ARCHITECTURE.md §8](ARCHITECTURE.md#8-lessons-learned-this-session) |
+| `max_image_bytes` | Oversized images are **skipped and logged**, never truncated: enforced on both the laptop and each device independently |
+| `screenshot_backup_dir` | Local folder every image clip (laptop-native or synced from a device) also gets saved into as a plain file, Windows'-own-naming-style (`Screenshot yyyy-MM-dd HHMMSS.png`). Empty string (default) disables it. A stopgap for a Windows 11 25H2 Snipping Tool bug: see [ARCHITECTURE.md §8](ARCHITECTURE.md#8-lessons-learned-this-session) |
 | `screenshot_backup_include_devices` | Whether `screenshot_backup_dir` also covers images arriving *from* the phone/tablet, not just ones captured on the laptop itself. Default `true` |
-| `screenshot_exclude_from_history` | Whether a device-synced image is excluded from Windows Clipboard History (Win+V) so it can't evict your other history entries. Default `true`. Ctrl+V still pastes it correctly either way - this only affects whether it's *listed* in Win+V. `false` brings back Win+V visibility for synced screenshots, at the cost of the eviction problem this exists to solve - see [bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md) |
+| `screenshot_exclude_from_history` | Whether a device-synced image is excluded from Windows Clipboard History (Win+V) so it can't evict your other history entries. Default `true`. Ctrl+V still pastes it correctly either way. This only affects whether it is listed in Win+V. `false` brings back Win+V visibility for synced screenshots, at the cost of the eviction problem this exists to solve: see [bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md) |
+| `camera_backup` | Whether photos captured in `/sdcard/DCIM/Camera` auto-sync to laptop. Default `false` |
+| `camera_device_subfolders` | Whether synced camera photos are stored in subdirectories named after each source device. Default `false` |
 | `allow_sensitive` | Whether clips flagged as sensitive by source apps (Android `EXTRA_IS_SENSITIVE`, e.g. Google Authenticator OTPs, Bitwarden/1Password passwords) are permitted to sync across the mesh. Default `false` (opt-in security gate) |
 | `sensitive_wipe_s` | Auto-wipe countdown in seconds (default `10.0`, configurable in dashboard or config). When a sensitive clip is synced, this timer automatically clears the clipboard across mesh nodes without leaving blank cards in Windows Clipboard History |
 
@@ -262,7 +259,7 @@ domain, and that mirrored clips never re-transfer their body.
 ### "adb connect failed" after rebooting a device
 
 Mostly does NOT happen in practice, once a device has paired Android's Wireless Debugging
-(or Shizuku) with a remembered network at least once -- confirmed 2026-08-31 by a real phone
+(or Shizuku) with a remembered network at least once: confirmed 2026-08-31 by a real phone
 reboot: `service.adb.tcp.port` was back at 5555 within 5 minutes, zero cable touched. The
 phone's adb keystore (`adb shell dumpsys adb`) shows a Shizuku-authorized key plus a
 remembered Wi-Fi AP list, which is almost certainly why: that pairing survives reboot on the
@@ -271,8 +268,8 @@ itself being a wiped-on-boot runtime property (that part of the explanation belo
 accurate, it is just not the whole story, and it is not something CopyClip or this repo
 controls either way).
 
-A device that has genuinely never been through that pairing -- freshly added, before its
-first setup, like a new Pixel -- does need a manual re-arm. Do it once, with the device on
+A device that has genuinely never been through that pairing: freshly added, before its
+first setup, like a new Pixel: does need a manual re-arm. Do it once, with the device on
 USB:
 
 ```bash
@@ -281,7 +278,7 @@ adb -d tcpip 5555
 
 `adb tcpip 5555` only ever sets the *runtime* property `service.adb.tcp.port`, wiped on
 reboot on its own (`persist.adb.tcp.port` stays empty, and making that persistent needs
-root, off limits here) -- so without a Wireless Debugging/Shizuku pairing already in place,
+root, off limits here): so without a Wireless Debugging/Shizuku pairing already in place,
 each real reboot does need this redone. The daemon reconnects on its own either way once the
 port is live. Each device reconnects independently, so one device rebooting never stops the
 other from working.
@@ -300,9 +297,9 @@ writing both devices directly, so sync keeps working meanwhile.
 
 Expected, by design, not a bug: `screenshot_exclude_from_history` (default `true`)
 deliberately excludes device-synced images from Windows Clipboard History. Ctrl+V still
-pastes the correct image — this only affects whether it's *listed* in Win+V. It exists
+pastes the correct image: this only affects whether it's *listed* in Win+V. It exists
 because a large synced image was found to evict the user's *other* Win+V entries, and
-there's no known way to keep both (visible in Win+V and not evicting anything) — see
+there's no known way to keep both (visible in Win+V and not evicting anything): see
 [bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md). Set the config key to `false` to
 bring back Win+V visibility for synced screenshots and accept the eviction risk instead.
 
@@ -328,7 +325,7 @@ Copy an image on any device, paste it on any other, same mechanism as text. `all
 in `config.json` is `true` by default: the two open questions from the pre-implementation
 device spike (see [bugs/SPIKE-IMAGE-CLIPBOARD.md](bugs/SPIKE-IMAGE-CLIPBOARD.md) and
 [ARCHITECTURE.md §6.6a](ARCHITECTURE.md#66a-image-clipboard-mediastore-under-app_process-and-why-it-needed-fakecontext))
-were confirmed in real use. PNG/JPEG/GIF/BMP/WEBP travel byte-for-byte; only HEIC/HEIF/AVIF
+were confirmed in real use. PNG/JPEG/GIF/BMP/WEBP travel byte-for-byte. Only HEIC/HEIF/AVIF
 transcode to PNG. Images are stored on-device under `Pictures/CopyClip` via MediaStore, and
 capped at `max_image_bytes` (default 24 MiB), skipped and logged rather than truncated if
 oversized.
@@ -341,14 +338,14 @@ session, not one (see
 
 The laptop side has a counterpart: `screenshot_backup_dir` saves every image clip (local or
 synced from a device) as a plain file too, same idea as the Android `Pictures/CopyClip`
-store but Windows'-own-filename-style — a stopgap for a Windows 11 25H2 Snipping Tool bug,
+store but Windows'-own-filename-style: a stopgap for a Windows 11 25H2 Snipping Tool bug,
 off by default (empty string).
 
 A device-synced image is also, by default, excluded from Windows Clipboard History
-(Win+V) — `screenshot_exclude_from_history`. Ctrl+V still pastes it normally; it just
-won't show up as its own entry in Win+V's list. This exists because a large synced image
+(Win+V): `screenshot_exclude_from_history`. Ctrl+V still pastes it normally. The image simply
+will not appear in the Win+V list. This exists because a large synced image
 was observed evicting the user's *other* Win+V entries, and there is no way to keep both
-(visible in Win+V *and* not evicting anything) — see
+(visible in Win+V *and* not evicting anything): see
 [bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md) for the full investigation.
 
 ## Future scope

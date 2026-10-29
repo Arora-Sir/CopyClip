@@ -33,7 +33,9 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
+import java.security.SecureRandom;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.lang.reflect.Constructor;
@@ -715,6 +717,7 @@ public final class ClipBridge {
         loadPersistedConf();
         initScreenshotWatch();
         initCameraWatch();
+        initInboundStreamServer();
 
         Thread stdin = new Thread(ClipBridge::readCommands, "copyclip-stdin");
         stdin.setDaemon(true);
@@ -934,6 +937,9 @@ public final class ClipBridge {
 
             applyConfJson(new String(decoded, StandardCharsets.UTF_8));
             emit("CONF-ACK");
+            if (inboundStreamPort > 0) {
+                emit("STREAM-PORT " + inboundStreamPort);
+            }
         } catch (Throwable t) {
             emit("ERR conf: " + describe(t));
         }
@@ -2273,6 +2279,163 @@ public final class ClipBridge {
                     socket.close();
                 } catch (Throwable ignored) {
                 }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- inbound stream server (reverse direct streaming)
+
+    private static ServerSocket inboundStreamServer = null;
+    private static int inboundStreamPort = 0;
+    private static final SecureRandom RNG = new SecureRandom();
+
+    private static String newNonce() {
+        byte[] b = new byte[16];
+        RNG.nextBytes(b);
+        return bytesToHex(b);
+    }
+
+    private static void initInboundStreamServer() {
+        try {
+            inboundStreamServer = new ServerSocket(0);
+            inboundStreamPort = inboundStreamServer.getLocalPort();
+            emit("STREAM-PORT " + inboundStreamPort);
+            Thread t = new Thread(ClipBridge::inboundStreamAcceptLoop, "copyclip-inbound-stream");
+            t.setDaemon(true);
+            t.start();
+        } catch (Throwable t) {
+            emit("DEBUG stream-server-init: " + describe(t));
+        }
+    }
+
+    private static void inboundStreamAcceptLoop() {
+        while (inboundStreamServer != null && !inboundStreamServer.isClosed()) {
+            try {
+                Socket sock = inboundStreamServer.accept();
+                new Thread(() -> handleInboundStreamConnection(sock), "copyclip-stream-worker").start();
+            } catch (Throwable t) {
+                if (inboundStreamServer == null || inboundStreamServer.isClosed()) {
+                    return;
+                }
+            }
+        }
+    }
+
+    private static String readAsciiLine(InputStream in) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(128);
+        int b;
+        while ((b = in.read()) != -1) {
+            if (b == '\n') {
+                break;
+            }
+            if (b != '\r') {
+                baos.write(b);
+            }
+        }
+        if (b == -1 && baos.size() == 0) {
+            return null;
+        }
+        return baos.toString("UTF-8");
+    }
+
+    private static void handleInboundStreamConnection(Socket sock) {
+        try {
+            sock.setSoTimeout(60000);
+            sock.setTcpNoDelay(true);
+            sock.setReceiveBufferSize(524288);
+            InputStream in = sock.getInputStream();
+            OutputStream out = sock.getOutputStream();
+
+            String nonce = newNonce();
+            out.write(("HELLO " + nonce + "\n").getBytes(StandardCharsets.UTF_8));
+            out.flush();
+
+            String authLine = readAsciiLine(in);
+            byte[] key = keyBytes;
+            if (key == null || authLine == null) {
+                out.write("AUTH-FAIL\n".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+            String expectedAuth = "AUTH " + hmacSha256(key, nonce.getBytes(StandardCharsets.UTF_8));
+            if (!authLine.trim().equals(expectedAuth)) {
+                out.write("AUTH-FAIL\n".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+            out.write("AUTH-OK\n".getBytes(StandardCharsets.UTF_8));
+            out.flush();
+
+            String myNonce = newNonce();
+            out.write(("CHALLENGE " + myNonce + "\n").getBytes(StandardCharsets.UTF_8));
+            out.flush();
+
+            String respLine = readAsciiLine(in);
+            if (respLine == null || !respLine.startsWith("RESPONSE ")) {
+                return;
+            }
+            String expectedResp = "RESPONSE " + hmacSha256(key, myNonce.getBytes(StandardCharsets.UTF_8));
+            if (!respLine.trim().equals(expectedResp)) {
+                return;
+            }
+
+            String frame = readAsciiLine(in);
+            if (frame == null) {
+                return;
+            }
+            String[] frameParts = frame.trim().split(" ", 3);
+            if (frameParts.length < 3) {
+                return;
+            }
+            int seq = Integer.parseInt(frameParts[0]);
+            String mac = frameParts[1];
+            String payloadLine = frameParts[2];
+            String expectedMac = hmacSha256(key, (seq + ":" + payloadLine).getBytes(StandardCharsets.UTF_8));
+            if (!mac.equalsIgnoreCase(expectedMac)) {
+                out.write("STREAM-FAIL auth\n".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+
+            // payloadLine: "STREAM <node> <mime> <sens> <sha256> <total_bytes>"
+            String[] parts = payloadLine.split(" ");
+            if (parts.length < 6 || !parts[0].equals("STREAM")) {
+                out.write("STREAM-FAIL malformed\n".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+            String mime = parts[2];
+            String expectedSha = parts[4];
+            int totalBytes = Integer.parseInt(parts[5]);
+
+            if (totalBytes > MAX_IMAGE_BYTES) {
+                out.write("STREAM-FAIL oversize\n".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+
+            byte[] buf = new byte[totalBytes];
+            int read = 0;
+            while (read < totalBytes) {
+                int n = in.read(buf, read, totalBytes - read);
+                if (n < 0) {
+                    out.write("STREAM-FAIL truncated\n".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+                read += n;
+            }
+
+            String actualSha = sha256Bytes(buf);
+            if (!actualSha.equalsIgnoreCase(expectedSha)) {
+                out.write("STREAM-FAIL sha_mismatch\n".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+
+            out.write("STREAM-OK\n".getBytes(StandardCharsets.UTF_8));
+            out.flush();
+
+            doSetImage(buf, mime);
+        } catch (Throwable t) {
+            emit("DEBUG inbound-stream-err: " + describe(t));
+        } finally {
+            try {
+                sock.close();
+            } catch (Throwable ignored) {
             }
         }
     }

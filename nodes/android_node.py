@@ -24,6 +24,7 @@ import base64
 import json
 import logging
 import queue
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from typing import Callable
 
 from core.models import ClipDescriptor, ClipPayload, WriteResult
 from transports import TransportError
+from transports.framing import challenge_response, seal
 
 from .base import ClipboardNode
 
@@ -119,9 +121,11 @@ class AndroidNode(ClipboardNode):
         # design for the same reason: there is never a backlog worth keeping).
         self._inbound_transfer: _InboundTransfer | None = None
         self.key_hex: str = ""
+        self.key_bytes: bytes = b""
         self.hub_host: str = ""
         self.push_port: int = 8387
         self.device_name: str = name
+        self._stream_port: int | None = None
 
     #: state -------------------------------------------------------------
 
@@ -154,26 +158,43 @@ class AndroidNode(ClipboardNode):
 
     def _supervise(self) -> None:
         backoff = self.reconnect_min_s
+        consecutive_failures = 0
+        last_heartbeat_time = 0.0
         while not self._stop.is_set():
             try:
                 transport = self._factory()
                 transport.start()
             except TransportError as exc:
                 self.last_error = str(exc)
-                log.warning("[%s] connect failed: %s", self.name, exc)
-                log.info("[%s] retrying in %.0fs", self.name, backoff)
+                consecutive_failures += 1
+                now = time.time()
+                if consecutive_failures <= 3:
+                    log.warning("[%s] connect failed (%d consecutive): %s", self.name, consecutive_failures, exc)
+                    log.info("[%s] retrying in %.0fs", self.name, backoff)
+                    last_heartbeat_time = now
+                elif now - last_heartbeat_time >= 1800:
+                    log.info("[%s] device offline for extended period (%d attempts), retrying in %.0fs",
+                             self.name, consecutive_failures, backoff)
+                    last_heartbeat_time = now
+                else:
+                    log.debug("[%s] connect failed (%d consecutive): %s", self.name, consecutive_failures, exc)
+
+                effective_max = 120.0 if consecutive_failures > 5 else self.reconnect_max_s
                 if self._stop.wait(backoff):
                     return
-                backoff = min(backoff * 2, self.reconnect_max_s)
+                backoff = min(backoff * 2, effective_max)
                 continue
             except Exception as exc:
                 self.last_error = str(exc)
+                consecutive_failures += 1
                 log.exception("[%s] unexpected connect error", self.name)
+                effective_max = 120.0 if consecutive_failures > 5 else self.reconnect_max_s
                 if self._stop.wait(backoff):
                     return
-                backoff = min(backoff * 2, self.reconnect_max_s)
+                backoff = min(backoff * 2, effective_max)
                 continue
 
+            consecutive_failures = 0
             backoff = self.reconnect_min_s
             self.last_error = None
             with self._lock:
@@ -449,6 +470,13 @@ class AndroidNode(ClipboardNode):
                 self._ack_event.set()
             log.debug("[%s] %s", self.name, line)
 
+        elif verb == "STREAM-PORT":
+            try:
+                self._stream_port = int(rest.strip())
+                log.info("[%s] direct reverse stream listener ready on port %d", self.name, self._stream_port)
+            except ValueError:
+                pass
+
         elif verb in ("PONG", "READY", "CONF-ACK"):
             log.debug("[%s] %s", self.name, line)
 
@@ -480,7 +508,7 @@ class AndroidNode(ClipboardNode):
 
     def write(self, payload: ClipPayload) -> str:
         if payload.is_image:
-            return self._write_chunked(payload)
+            return self._write_image(payload)
 
         if payload.text is None:
             return WriteResult.REJECTED
@@ -516,6 +544,88 @@ class AndroidNode(ClipboardNode):
         # itself on unlock, so a locked device is reported honestly instead of as success.
         return WriteResult.DEFERRED if self._locked else WriteResult.OK
 
+    def _device_ip(self) -> str | None:
+        with self._lock:
+            transport = self._transport
+        if transport is None:
+            return None
+        dev_str = getattr(transport, "device", None) or getattr(transport, "host", None)
+        if not dev_str:
+            return None
+        return dev_str.split(":")[0]
+
+    def _try_direct_stream(self, payload: ClipPayload) -> str | None:
+        target_ip = self._device_ip()
+        if not target_ip or not self._stream_port or not self.key_bytes:
+            return None
+        t0 = time.time()
+        sock = None
+        f = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3.0)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.connect((target_ip, self._stream_port))
+            sock.settimeout(60.0)
+
+            f = sock.makefile("rwb", buffering=0)
+            hello = f.readline().decode("utf-8", "replace").strip()
+            if not hello.startswith("HELLO "):
+                return None
+            srv_nonce = hello.split(" ", 1)[1]
+
+            auth_resp = challenge_response(self.key_bytes, srv_nonce)
+            f.write(f"AUTH {auth_resp}\n".encode("utf-8"))
+
+            auth_ok = f.readline().decode("utf-8", "replace").strip()
+            if auth_ok != "AUTH-OK":
+                return None
+
+            chall = f.readline().decode("utf-8", "replace").strip()
+            if not chall.startswith("CHALLENGE "):
+                return None
+            my_nonce = chall.split(" ", 1)[1]
+
+            resp = challenge_response(self.key_bytes, my_nonce)
+            f.write(f"RESPONSE {resp}\n".encode("utf-8"))
+
+            cmd = f"STREAM {self.name} {payload.mime} {1 if payload.sensitive else 0} {payload.sha256} {len(payload.data)}"
+            frame = seal(self.key_bytes, 1, cmd)
+            f.write(f"{frame}\n".encode("utf-8"))
+
+            f.write(payload.data)
+
+            res = f.readline().decode("utf-8", "replace").strip()
+            if res == "STREAM-OK":
+                duration = time.time() - t0
+                rate_mb = (len(payload.data) / 1048576) / duration if duration > 0 else 0
+                log.info("[%s] direct reverse TCP stream of %d bytes completed in %.2fs (%.2f MB/s)",
+                         self.name, len(payload.data), duration, rate_mb)
+                return WriteResult.DEFERRED if self._locked else WriteResult.OK
+        except Exception as exc:
+            log.info("[%s] direct reverse TCP stream failed (%s); falling back to ADB chunked stream",
+                     self.name, exc)
+            return None
+        finally:
+            if f is not None:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        return None
+
+    def _write_image(self, payload: ClipPayload) -> str:
+        if self._stream_port and self.key_bytes and len(payload.data) >= 131072:
+            res = self._try_direct_stream(payload)
+            if res is not None:
+                return res
+        return self._write_chunked(payload)
+
     def _write_chunked(self, payload: ClipPayload) -> str:
         """Image write path: SETB header + SETC chunks. Text's single-line SET path above
         is completely untouched by this: it is a parallel code path, not a shared one.
@@ -531,6 +641,7 @@ class AndroidNode(ClipboardNode):
         self._transfer_seq += 1
         transfer_id = f"{self.name}-{self._transfer_seq}"
 
+        t0 = time.time()
         self._ack_event.clear()
         self._ack_verb = "set"
         try:
@@ -559,15 +670,19 @@ class AndroidNode(ClipboardNode):
             self._ack_verb = None
             return WriteResult.FAILED
 
-        final_timeout = max(self.ack_timeout_s, 30.0)
+        final_timeout = max(self.ack_timeout_s, 60.0)
         confirmed = self._ack_event.wait(timeout=final_timeout)
         self._ack_verb = None
+        duration = time.time() - t0
+        mb_rate = (payload.size / 1048576) / duration if duration > 0 else 0
         if not confirmed:
             log.warning("[%s] no final ACK/DEFER for image SET within %.1fs; "
                         "treating channel as dead", self.name, final_timeout)
             transport.mark_dead()
             return WriteResult.FAILED
 
+        log.info("[%s] chunked write of %d bytes completed in %.2fs (%.2f MB/s)",
+                 self.name, payload.size, duration, mb_rate)
         return WriteResult.DEFERRED if self._locked else WriteResult.OK
 
     def request_refresh(self) -> None:
@@ -624,6 +739,7 @@ class AndroidNode(ClipboardNode):
     def send_conf(self, key_hex: str, hub_host: str, push_port: int, device_name: str) -> None:
         """Pushes auto-provisioning configuration to the device over the secure transport."""
         self.key_hex = key_hex
+        self.key_bytes = key_hex.encode("utf-8") if key_hex else b""
         self.hub_host = hub_host
         self.push_port = push_port
         self.device_name = device_name

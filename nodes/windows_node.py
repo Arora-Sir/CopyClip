@@ -41,7 +41,8 @@ class WindowsNode(ClipboardNode):
                  sensitive_wipe_s: float = 10.0,
                  direct_password_sync: bool = False,
                  camera_backup: bool = True,
-                 camera_backup_dir: str | None = None) -> None:
+                 camera_backup_dir: str | None = None,
+                 camera_device_subfolders: bool = False) -> None:
         super().__init__(name)
         self._watcher: winclip.ClipboardWatcher | None = None
         self._running = False
@@ -58,6 +59,7 @@ class WindowsNode(ClipboardNode):
         self.direct_password_sync = direct_password_sync
         self._camera_backup = camera_backup
         self._camera_backup_dir = camera_backup_dir or None
+        self._camera_device_subfolders = camera_device_subfolders
         self._wipe_timer: threading.Timer | None = None
 
     def update_config(self, *, screenshot_dir: str | None = None,
@@ -68,7 +70,8 @@ class WindowsNode(ClipboardNode):
                       sensitive_wipe_s: float | None = None,
                       direct_password_sync: bool | None = None,
                       camera_backup: bool | None = None,
-                      camera_backup_dir: str | None = None) -> None:
+                      camera_backup_dir: str | None = None,
+                      camera_device_subfolders: bool | None = None) -> None:
         """Hot-reloads screenshot directories and options at runtime without restart."""
         self._screenshot_dir = screenshot_dir or None
         self._screenshot_include_devices = screenshot_include_devices
@@ -83,6 +86,8 @@ class WindowsNode(ClipboardNode):
             self._camera_backup = camera_backup
         if camera_backup_dir is not None:
             self._camera_backup_dir = camera_backup_dir or None
+        if camera_device_subfolders is not None:
+            self._camera_device_subfolders = camera_device_subfolders
         log.info("[%s] runtime configuration updated (dir=%s, subfolders=%s, custom=%s, camera_backup=%s)",
                  self.name, self._screenshot_dir, self._screenshot_device_subfolders,
                  list(self._device_screenshot_paths.keys()), self._camera_backup)
@@ -227,6 +232,8 @@ class WindowsNode(ClipboardNode):
         if not self._screenshot_dir or not self._camera_backup:
             return
         camera_dir = self._camera_backup_dir or os.path.join(self._screenshot_dir, "Camera")
+        if self._camera_device_subfolders and payload.origin:
+            camera_dir = os.path.join(camera_dir, payload.origin)
         try:
             os.makedirs(camera_dir, exist_ok=True)
             ext = ".jpg"

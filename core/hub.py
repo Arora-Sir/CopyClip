@@ -119,6 +119,7 @@ class Hub:
                 direct_password_sync=self.direct_password_sync,
                 camera_backup=camera_backup,
                 camera_backup_dir=camera_backup_dir,
+                camera_device_subfolders=cfg.get("camera_device_subfolders", False),
             )
         log.info("hub configuration hot-reloaded dynamically")
 

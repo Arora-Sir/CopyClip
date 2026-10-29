@@ -188,6 +188,7 @@ def build_hub(cfg: dict) -> Hub:
         direct_password_sync=cfg.get("direct_password_sync", False),
         camera_backup=cfg.get("camera_backup", True),
         camera_backup_dir=cfg.get("camera_backup_dir") or None,
+        camera_device_subfolders=cfg.get("camera_device_subfolders", False),
     )
     android: dict[str, AndroidNode] = {}
     hub_ref: dict[str, Hub] = {}
@@ -268,7 +269,7 @@ def build_hub(cfg: dict) -> Hub:
 
 
 def build_push_listener(cfg: dict, hub: Hub):
-    """The "Send Clip" inbound tier -- see transports/push_listener.py's own docstring for
+    """The "Send Clip" inbound tier: see transports/push_listener.py's own docstring for
     why this direction exists at all. Reuses the same key file as the tcp transport tier;
     a device that cannot reach this at all just never uses it, so there is nothing to
     disable per-device.

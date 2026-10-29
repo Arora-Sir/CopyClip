@@ -833,6 +833,12 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
                                  activebackground=SURFACE, activeforeground=TEXT, font=(FONT_FAMILY, 8))
         chk_cam.pack(anchor="w", pady=(6, 0))
 
+        camera_subfolders_var = tk.BooleanVar(value=curr_cfg.get("camera_device_subfolders", False))
+        chk_cam_sub = tk.Checkbutton(ss_card, text="Organize Camera Photos by Device Subfolders (Camera\\<device>\\)",
+                                     variable=camera_subfolders_var, bg=SURFACE, fg=TEXT, selectcolor=SURFACE_CARD,
+                                     activebackground=SURFACE, activeforeground=TEXT, font=(FONT_FAMILY, 8))
+        chk_cam_sub.pack(anchor="w", pady=(4, 0))
+
         # 3. Clipboard Sync Policies Section
         tk.Label(config_scroll_content, text="CLIPBOARD MESH POLICIES & LIMITS", bg=BG, fg=TEXT_MUTED,
                  font=(FONT_FAMILY, 9, "bold")).pack(anchor="w", pady=(10, 8))
@@ -1074,6 +1080,7 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
             }
             new_cfg["screenshot_exclude_from_history"] = exc_history_var.get()
             new_cfg["camera_backup"] = camera_backup_var.get()
+            new_cfg["camera_device_subfolders"] = camera_subfolders_var.get()
             new_cfg["max_chars"] = max_c
             new_cfg["adopt_on_connect"] = adopt_var.get()
             new_cfg["push_port"] = push_p

@@ -44,7 +44,7 @@
   "allow_sensitive": true,
   "sensitive_wipe_s": 10.0,
   "_direct_password_sync": "direct_password_sync defaults false. When true, sensitive clips write directly to Windows Clipboard History without exclusion or auto-wipe, and intentional repeat copies refresh to the top of the clipboard.",
-  "direct_password_sync": true,
+  "direct_password_sync": false,
   "_images": "allow_images defaults false (fail-safe) until real-use verification per bugs/SPIKE-IMAGE-CLIPBOARD.md's open Q5/Q7 is confirmed. max_image_bytes is independently enforced on both the laptop (core/policy.py) and each device (android/ClipBridge.java's own MAX_IMAGE_BYTES) -- belt and braces, not just one check.",
   "allow_images": true,
   "max_image_bytes": 62914560,
@@ -71,6 +71,7 @@
   "idle_ping_s": 60.0,
   "ack_timeout_s": 4.0,
   "log_level": "INFO",
-  "camera_backup": true,
-  "camera_backup_dir": ""
+  "camera_backup": false,
+  "camera_backup_dir": "",
+  "camera_device_subfolders": false
 }
