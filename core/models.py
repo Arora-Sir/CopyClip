@@ -19,7 +19,7 @@ TEXT_MIMES = ("text/plain", "text/html")
 # transcode. heic/heif/avif and anything else land outside this set and get transcoded to
 # image/png at the point of capture (nodes/windows_node.py, android/ClipBridge.java) --
 # Windows cannot reliably decode those, so they never reach this list as-is.
-IMAGE_MIMES = ("image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp")
+IMAGE_MIMES = ("image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp", "image/heic", "image/heif")
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,7 @@ class ClipPayload:
     origin: str                 # node name this clip was first observed on
     ts: float = field(default_factory=time.time)
     sensitive: bool = False
+    is_camera: bool = False
 
     # -- identity ----------------------------------------------------------
 
@@ -88,8 +89,9 @@ class ClipPayload:
 
     @classmethod
     def from_b64(cls, b64: str, *, mime: str, origin: str,
-                 sensitive: bool = False) -> "ClipPayload":
-        return cls(mime=mime, data=base64.b64decode(b64), origin=origin, sensitive=sensitive)
+                 sensitive: bool = False, is_camera: bool = False) -> "ClipPayload":
+        return cls(mime=mime, data=base64.b64decode(b64), origin=origin,
+                   sensitive=sensitive, is_camera=is_camera)
 
     def to_b64(self) -> str:
         return base64.b64encode(self.data).decode("ascii")
@@ -97,13 +99,16 @@ class ClipPayload:
     # -- serialisation for the durable outbox ------------------------------
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "mime": self.mime,
             "data_b64": self.to_b64(),
             "origin": self.origin,
             "ts": self.ts,
             "sensitive": self.sensitive,
         }
+        if self.is_camera:
+            d["is_camera"] = True
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "ClipPayload":
@@ -113,6 +118,7 @@ class ClipPayload:
             origin=d["origin"],
             ts=d.get("ts", time.time()),
             sensitive=d.get("sensitive", False),
+            is_camera=d.get("is_camera", False),
         )
 
     def __repr__(self) -> str:

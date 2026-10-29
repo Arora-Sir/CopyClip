@@ -38,7 +38,8 @@ class Hub:
     def __init__(self, *, nodes: list[ClipboardNode], domains: list[SyncDomain],
                  policy: Policy, outbox: Outbox, dedup: RecentClips | None = None,
                  baseline_store: BaselineStore | None = None,
-                 tick_s: float = 2.0, adopt_on_connect: bool = False) -> None:
+                 tick_s: float = 2.0, adopt_on_connect: bool = False,
+                 direct_password_sync: bool = False) -> None:
         self.nodes = {n.name: n for n in nodes}
         self.domains = domains
         self.policy = policy
@@ -47,6 +48,7 @@ class Hub:
         self.baseline_store = baseline_store
         self.tick_s = tick_s
         self.adopt_on_connect = adopt_on_connect
+        self.direct_password_sync = direct_password_sync
         # Plain bool, not lock-guarded: a UI toggle racing one in-flight clip by a few
         # milliseconds is harmless, and CPython's GIL already makes the read/write atomic.
         self.paused = False
@@ -96,6 +98,15 @@ class Hub:
                 if hasattr(node, "set_sensitive_wipe_s"):
                     node.set_sensitive_wipe_s(wipe_s_float)
 
+        if "direct_password_sync" in cfg:
+            self.direct_password_sync = bool(cfg.get("direct_password_sync", False))
+
+        camera_backup = bool(cfg.get("camera_backup", True))
+        camera_backup_dir = cfg.get("camera_backup_dir") or None
+        for node in self.nodes.values():
+            if hasattr(node, "set_camera_backup"):
+                node.set_camera_backup(camera_backup)
+
         laptop_node = self.nodes.get("laptop")
         if laptop_node is not None and hasattr(laptop_node, "update_config"):
             laptop_node.update_config(
@@ -105,10 +116,13 @@ class Hub:
                 device_screenshot_paths=cfg.get("device_screenshot_paths", {}),
                 exclude_synced_images_from_history=cfg.get("screenshot_exclude_from_history", True),
                 sensitive_wipe_s=float(wipe_s) if wipe_s is not None else None,
+                direct_password_sync=self.direct_password_sync,
+                camera_backup=camera_backup,
+                camera_backup_dir=camera_backup_dir,
             )
         log.info("hub configuration hot-reloaded dynamically")
 
-    # -- topology ----------------------------------------------------------
+    #: topology ----------------------------------------------------------
 
     def domain_of(self, node_name: str) -> SyncDomain | None:
         return next((d for d in self.domains if d.contains(node_name)), None)
@@ -116,7 +130,7 @@ class Hub:
     def _standalone_nodes(self) -> list[ClipboardNode]:
         return [n for n in self.nodes.values() if self.domain_of(n.name) is None]
 
-    # -- lifecycle ---------------------------------------------------------
+    #: lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
         for node in self.nodes.values():
@@ -151,7 +165,7 @@ class Hub:
             except Exception:
                 log.exception("outbox drain failed")
 
-    # -- inbound -----------------------------------------------------------
+    #: inbound -----------------------------------------------------------
 
     def on_stamp(self, node_name: str, stamp: str) -> None:
         """A device saw a change but deliberately did not read the content."""
@@ -179,10 +193,15 @@ class Hub:
                 d.note_observed(desc.sha256, desc.node)
 
             if known:
-                self.dedup.mark_delivered(desc.sha256, desc.node)
-                log.debug("[%s] announced %s, already known; body not fetched",
-                          desc.node, desc.short)
-                return
+                if self.dedup.is_recopy(desc.sha256, desc.node):
+                    log.info("[%s] re-copied %s; re-fetching body to update clipboard",
+                             desc.node, desc.short)
+                    self.dedup.prepare_for_redelivery(desc.sha256, desc.node)
+                else:
+                    self.dedup.mark_delivered(desc.sha256, desc.node)
+                    log.debug("[%s] announced %s, already known; body not fetched",
+                              desc.node, desc.short)
+                    return
 
             if desc.sensitive and not self.policy.allow_sensitive:
                 self.stats["skipped"] += 1
@@ -209,9 +228,21 @@ class Hub:
         if self.paused or (payload.origin in self.paused_devices):
             log.debug("sync paused for %s; ignoring clip", payload.origin)
             return
+
+        if payload.is_camera:
+            laptop = self.nodes.get("laptop")
+            if laptop is not None:
+                res = laptop.write(payload)
+                log.info("[%s] camera photo delivered to laptop: %s", payload.origin, res)
+            return
+
         with self._route_lock:
             sha = payload.sha256
             source = payload.origin
+
+            if self.dedup.is_recopy(sha, source):
+                log.info("[%s] local re-copy of %s; refreshing mesh", source, payload.short)
+                self.dedup.prepare_for_redelivery(sha, source)
 
             is_new = self.dedup.observe(sha, source)
 
@@ -223,7 +254,7 @@ class Hub:
                 d.note_observed(sha, source)
 
             # Record what's now current on the source device regardless of how this clip
-            # ends up routed below -- this is the persisted memory that lets a later
+            # ends up routed below: this is the persisted memory that lets a later
             # daemon restart tell "device unchanged since we last looked" apart from
             # "device changed while we were down", see on_node_connected().
             if self.baseline_store:
@@ -276,7 +307,7 @@ class Hub:
 
             self._route(payload, source_domain=domain, origin_display=origin_display)
 
-    # -- outbound ----------------------------------------------------------
+    #: outbound ----------------------------------------------------------
 
     def _route(self, payload: ClipPayload, source_domain: SyncDomain | None,
                origin_display: str | None = None) -> None:
@@ -300,7 +331,7 @@ class Hub:
     def _deliver_to_domain(self, domain: SyncDomain, payload: ClipPayload,
                            origin_display: str | None = None) -> bool:
         """Returns True once nothing is left outstanding for this domain (delivered now or
-        already held), so callers -- specifically _drain_outbox -- know whether to clear the
+        already held), so callers: specifically _drain_outbox: know whether to clear the
         outbox entry. Do not infer this from stats["delivered"]: an already-satisfied target
         resolves without incrementing it.
         """
@@ -315,7 +346,7 @@ class Hub:
             # Captured before the call: this is the only way to know whether
             # _deliver_to_node is about to attempt a genuine write or short-circuit because
             # the node already has this content. note_write() below must only fire for a
-            # real write -- redundantly re-arming it for an already-satisfied node makes the
+            # real write: redundantly re-arming it for an already-satisfied node makes the
             # health probe time out every grace_s against a device with nothing new to
             # confirm, which falsely trips the domain into "degraded" after fail_threshold
             # misses even though nothing is actually wrong.
@@ -323,7 +354,7 @@ class Hub:
             # queue_on_failure=False: a domain target that fails is this function's problem,
             # not _deliver_to_node's. Queuing at the node level here used to leave a stray
             # "node:<name>" entry alongside the "domain:<name>" one below for the exact same
-            # payload -- retrying the node-level entry writes straight back to that specific
+            # payload: retrying the node-level entry writes straight back to that specific
             # device, bypassing the domain's own representative re-election, and could
             # survive to fire a stale rewrite well after the domain had already recovered.
             if self._deliver_to_node(node, payload, origin_display=origin_display,
@@ -345,10 +376,10 @@ class Hub:
         sha = payload.sha256
         display = origin_display or payload.origin
         if not self.dedup.should_deliver(sha, node.name):
-            # Nothing outstanding for this node -- treat as satisfied, not failed. Returning
+            # Nothing outstanding for this node: treat as satisfied, not failed. Returning
             # False here used to make a stale outbox entry for an already-delivered payload
             # re-queue itself forever (every tick, with its own log line and disk write)
-            # until the dedup record's TTL expired, up to 90s later -- which is exactly how
+            # until the dedup record's TTL expired, up to 90s later: which is exactly how
             # a long-since-superseded write could fire a "phantom" delivery well after the
             # fact.
             log.debug("%s already holds %s", node.name, payload.short)
@@ -387,7 +418,7 @@ class Hub:
         log.warning("%s -> %s rejected (%s)", display, node.name, result)
         return False
 
-    # -- recovery ----------------------------------------------------------
+    #: recovery ----------------------------------------------------------
 
     def _drain_outbox(self) -> None:
         # Locked per entry, not for the whole drain: node.write() can now block for real
@@ -396,7 +427,7 @@ class Hub:
         # attempt still needs to be atomic against on_clip()'s _route() chain. But holding
         # the lock for the *entire* loop let one slow or genuinely-still-failing entry starve
         # a concurrent, unrelated on_clip() call for as long as the whole backlog took to
-        # walk -- narrowing to per-entry keeps the same race protection with a much smaller
+        # walk: narrowing to per-entry keeps the same race protection with a much smaller
         # worst-case latency hit on real-time events.
         for key in list(self.outbox.keys()):
             with self._route_lock:
@@ -438,9 +469,15 @@ class Hub:
 
     def on_node_unlocked(self, node: ClipboardNode, locked: bool) -> None:
         if not locked:
+            for domain in self.domains:
+                if domain.contains(node.name):
+                    try:
+                        domain.apply_modes()
+                    except Exception:
+                        log.exception("apply_modes on unlock failed for domain %s", domain.name)
             self._drain_outbox()
 
-    # -- diagnostics -------------------------------------------------------
+    #: diagnostics -------------------------------------------------------
 
     def status(self) -> dict:
         return {

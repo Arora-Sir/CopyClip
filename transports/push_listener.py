@@ -3,11 +3,11 @@
 Every other transport has the hub dialing OUT to a device's bridge (TcpTransport,
 AdbTransport). This is the one direction that runs backwards, and exists for exactly one
 case: a device Android will not grant background clipboard access to (no shell UID
-available -- see bugs/SPIKE-PIXEL-ACCESSIBILITY.md) can still push a clip in response to a
+available: see bugs/SPIKE-PIXEL-ACCESSIBILITY.md) can still push a clip in response to a
 user action, because being the foreground app when the user taps "Send Clip" is a real,
 unprivileged read exemption Android already grants, confirmed live against this project's
 own ClipboardService logs. Same HMAC mutual handshake as tcp_transport.py, just played from
-the opposite role -- framing.py's primitives are direction-agnostic on purpose.
+the opposite role: framing.py's primitives are direction-agnostic on purpose.
 
 Wire, one connection per push:
     hub  -> HELLO <nonce>
@@ -21,6 +21,7 @@ Wire, one connection per push:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import socket
 import threading
@@ -71,12 +72,9 @@ class PushListener:
                              name="copyclip-push-client").start()
 
     def _serve(self, conn: socket.socket, addr) -> None:
-        # One push per connection, so a hung or hostile peer costs one thread and a 20s
-        # timeout, never a wedged shared listener -- there is no persistent state here for
-        # a slow client to stall. 20s not 10s: an image push arrives as one unchunked line
-        # (see ARCHITECTURE.md's Send Clip section), a slow link needs more room than a
-        # few-byte text push ever did.
-        conn.settimeout(20.0)
+        # One push per connection, so a hung or hostile peer costs one thread and a timeout,
+        # never a wedged shared listener. 60s timeout allows multi-megabyte image streams to finish cleanly.
+        conn.settimeout(60.0)
         f = None
         try:
             f = conn.makefile("rwb", buffering=0)
@@ -107,14 +105,86 @@ class PushListener:
             except AuthError as exc:
                 log.warning("push from %s: %s", addr[0], exc)
                 return
-            self._handle_push(payload_line, f)
+            if payload_line.startswith("STREAM "):
+                self._handle_stream(payload_line, f, addr)
+            else:
+                self._handle_push(payload_line, f)
         except (OSError, ValueError) as exc:
             log.debug("push connection from %s ended: %s", addr[0], exc)
         finally:
+            if f is not None:
+                try:
+                    f.close()
+                except Exception:
+                    pass
             try:
                 conn.close()
             except OSError:
                 pass
+
+    def _handle_stream(self, line: str, f, addr) -> None:
+        parts = line.split(" ")
+        if len(parts) < 6:
+            f.write(b"STREAM-FAIL malformed\n")
+            return
+        if len(parts) == 6:
+            _, node, mime, sensitive, expected_sha, total_bytes_s = parts
+            is_camera = False
+        else:
+            _, node, mime, sensitive, is_camera_s, expected_sha, total_bytes_s = parts[:7]
+            is_camera = (is_camera_s == "1" or is_camera_s.lower() == "true")
+
+        try:
+            total_bytes = int(total_bytes_s)
+        except ValueError:
+            f.write(b"STREAM-FAIL bad_length\n")
+            return
+
+        max_allowed = getattr(self.hub.policy, "max_image_bytes", 62914560)
+        if total_bytes > max_allowed:
+            log.warning("direct stream from %s exceeds cap (%d > %d)", node, total_bytes, max_allowed)
+            f.write(b"STREAM-FAIL oversize\n")
+            return
+
+        hasher = hashlib.sha256()
+        buf = bytearray()
+        remaining = total_bytes
+        chunk_size = 262144
+        try:
+            while remaining > 0:
+                chunk = f.read(min(remaining, chunk_size))
+                if not chunk:
+                    log.warning("direct stream from %s truncated (read %d of %d bytes)",
+                                node, len(buf), total_bytes)
+                    f.write(b"STREAM-FAIL truncated\n")
+                    return
+                buf.extend(chunk)
+                hasher.update(chunk)
+                remaining -= len(chunk)
+        except Exception as exc:
+            log.warning("direct stream from %s socket read error: %s", node, exc)
+            f.write(b"STREAM-FAIL read_error\n")
+            return
+
+        actual_sha = hasher.hexdigest()
+        if actual_sha.lower() != expected_sha.lower():
+            log.warning("direct stream from %s sha mismatch (got %s, expected %s)",
+                        node, actual_sha, expected_sha)
+            f.write(b"STREAM-FAIL sha_mismatch\n")
+            return
+
+        raw_data = bytes(buf)
+        payload = ClipPayload(
+            mime=mime,
+            data=raw_data,
+            origin=node,
+            sensitive=(sensitive == "1"),
+            is_camera=is_camera,
+        )
+        log.info("[%s] direct TCP stream received (%d bytes, sha=%s, camera=%s)",
+                 node, len(raw_data), payload.short, is_camera)
+        self.hub.on_clip(payload)
+        f.write(b"STREAM-OK\n")
 
     def _handle_push(self, line: str, f) -> None:
         parts = line.split(" ", 4)

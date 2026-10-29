@@ -63,3 +63,6 @@ desktop.ini
 .idea/
 .vscode/
 *.swp
+
+# --- project tracking ----------------------------------------------------
+PROJECT_TRACKER.md

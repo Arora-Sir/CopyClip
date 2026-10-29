@@ -42,10 +42,12 @@
   "allow_non_text": false,
   "_sensitive": "allow_sensitive defaults false (fail-safe opt-in). When true, sensitive clips (OTPs, Authenticator codes) sync across mesh with configurable auto-wipe (default 10s), excluded from Windows Win+V History with zero blank card artifacts, blocked from Microsoft Cloud Clipboard, and bypassed from outbox disk persistence.",
   "allow_sensitive": true,
-  "sensitive_wipe_s": 5.0,
+  "sensitive_wipe_s": 10.0,
+  "_direct_password_sync": "direct_password_sync defaults false. When true, sensitive clips write directly to Windows Clipboard History without exclusion or auto-wipe, and intentional repeat copies refresh to the top of the clipboard.",
+  "direct_password_sync": true,
   "_images": "allow_images defaults false (fail-safe) until real-use verification per bugs/SPIKE-IMAGE-CLIPBOARD.md's open Q5/Q7 is confirmed. max_image_bytes is independently enforced on both the laptop (core/policy.py) and each device (android/ClipBridge.java's own MAX_IMAGE_BYTES) -- belt and braces, not just one check.",
   "allow_images": true,
-  "max_image_bytes": 25165824,
+  "max_image_bytes": 62914560,
   "image_chunk_bytes": 49152,
   "_screenshot_backup": "Stopgap for a Windows 11 25H2 Snipping Tool bug: having both its own \"automatically save\" and \"automatically copy\" settings on double-writes the clipboard (see ARCHITECTURE.md's 'Two entries in Windows Clipboard History' note). With Windows' own auto-save turned off to fix that, this replicates the local file save instead -- for screenshots taken on the laptop AND, via screenshot_backup_include_devices, ones taken on the phone/tablet that sync here. Empty dir disables both. Remove once Microsoft fixes the underlying bug and Windows' own setting is safe to re-enable.",
   "screenshot_backup_dir": "<home>\\Pictures\\Screenshots\\Temporary Screenshots",
@@ -59,6 +61,7 @@
   "_screenshot_exclude_from_history": "A large device-synced image was observed evicting other entries from Windows Clipboard History (Win+V) -- see bugs/BUG-005's Open points. Excluding it from History fixes that, at the cost of the synced image itself never appearing in the Win+V list (Ctrl+V still pastes it correctly either way -- this only affects History's own bookkeeping, not the live clipboard). Set to false to go back to showing synced images in Win+V history and accept the occasional eviction of other entries.",
   "screenshot_exclude_from_history": true,
   "_push_port": "Hub-side listener for the 'Send Clip' manual fallback (transports/push_listener.py) -- a device dials IN here instead of the hub polling it, for devices background sync cannot reach (pixel). Same copyclip.key, mutual HMAC handshake either direction.",
+  "hub_ip": "100.64.0.1",
   "push_port": 8387,
   "_adopt_on_connect": "false keeps a reconnect from overwriting what you just copied on the laptop with the device's older clip.",
   "adopt_on_connect": false,
@@ -67,5 +70,7 @@
   "reconnect_max_s": 30.0,
   "idle_ping_s": 60.0,
   "ack_timeout_s": 4.0,
-  "log_level": "INFO"
+  "log_level": "INFO",
+  "camera_backup": true,
+  "camera_backup_dir": ""
 }

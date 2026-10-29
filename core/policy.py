@@ -18,7 +18,7 @@ class Policy:
                  allow_non_text: bool = False,
                  allow_sensitive: bool = False,
                  allow_images: bool = False,
-                 max_image_bytes: int = 25_165_824) -> None:
+                 max_image_bytes: int = 62_914_560) -> None:
         self.max_chars = max_chars
         self.denylist = [re.compile(p) for p in (denylist_regex or [])]
         self.allow_non_text = allow_non_text

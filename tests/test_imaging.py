@@ -83,6 +83,21 @@ def test_dibv5_roundtrip():
           "alpha-loss bug)", decoded == bgra)
 
 
+def test_dib_32bpp_roundtrip():
+    """png_to_dib builds a standard BITMAPINFOHEADER CF_DIB. Verify it round trips through
+    dib_to_png accurately so applications querying CF_DIB receive correct pixels.
+    """
+    w, h = 64, 48
+    bgra = _gradient_bgra(w, h)
+    dib = winimage.png_to_dib(bgra, w, h)
+    check("DIB length matches 40-byte header plus pixels", len(dib) == 40 + w * h * 4)
+    png = winimage.dib_to_png(dib)
+    decoded, dw, dh = winimage.decode(png)
+    check("CF_DIB round trip dimensions correct", (dw, dh) == (w, h))
+    check("CF_DIB round trip byte-identical", decoded == bgra)
+
+
+
 def test_dib_24bpp_bottom_up_with_padding():
     """Hand-built BITMAPINFOHEADER DIB, bottom-up storage, 4-byte row padding -- exercises
     dib_to_png's header parsing directly rather than through our own encoder.
@@ -202,6 +217,7 @@ def main() -> int:
         ("png-roundtrip-no-alpha", test_png_roundtrip_without_alpha),
         ("encoder-determinism", test_encoder_determinism),
         ("dibv5-roundtrip", test_dibv5_roundtrip),
+        ("dib-32bpp-roundtrip", test_dib_32bpp_roundtrip),
         ("dib-24bpp-bottom-up", test_dib_24bpp_bottom_up_with_padding),
         ("malformed-input", test_malformed_input_raises_not_crashes),
         ("real-jpeg-decode", test_real_jpeg_decode),

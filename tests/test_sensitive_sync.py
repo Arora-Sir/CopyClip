@@ -69,7 +69,11 @@ def test_windows_endpoint_formats():
     check("CanUploadToCloudClipboard registered and set", cloud_avail)
     check("CanUploadToCloudClipboard value is DWORD 0",
           cloud_val == (0).to_bytes(4, "little"), repr(cloud_val))
-    check("clipboard content matches test text", winclip.read_text() == test_otp)
+    res_text = winclip.read_text()
+    if res_text != test_otp:
+        time.sleep(0.05)
+        res_text = winclip.read_text()
+    check("clipboard content matches test text", res_text == test_otp)
 
     if orig is not None:
         try:
@@ -317,6 +321,60 @@ def test_local_copy_cancels_timer():
         fake_timer.cancel()
 
 
+def test_direct_password_sync_toggle():
+    """Verify WindowsNode direct password sync toggle behavior.
+
+    When direct_password_sync is enabled, sensitive clips write directly to the
+    clipboard with regular text semantics. No auto-wipe timer is armed.
+    When disabled, sensitive clips arm an auto-wipe timer and set history exclusion.
+    """
+    time.sleep(0.05)
+    try:
+        orig = winclip.read_text()
+    except Exception:
+        orig = None
+
+    node = WindowsNode("laptop-direct-pwd-test", direct_password_sync=True, sensitive_wipe_s=30.0)
+    p_secret = ClipPayload.from_text("BitwardenMasterSecret", "phone", sensitive=True)
+
+    try:
+        res = node.write(p_secret)
+        check("write succeeded with direct_password_sync=True", res == WriteResult.OK)
+        check("no wipe timer armed when direct_password_sync is enabled", node._wipe_timer is None)
+        check("clipboard content matches secret", winclip.read_text() == "BitwardenMasterSecret")
+
+        with winclip._Opened():
+            hist_avail = bool(winclip.user32.IsClipboardFormatAvailable(
+                winclip.CF_CAN_INCLUDE_IN_HISTORY))
+        check("CanIncludeInClipboardHistory not registered for direct sync", not hist_avail)
+
+        node.update_config(direct_password_sync=False)
+        check("node direct_password_sync toggled to False", node.direct_password_sync is False)
+
+        p_secret2 = ClipPayload.from_text("BitwardenMasterSecret2", "phone", sensitive=True)
+        res2 = node.write(p_secret2)
+        check("second write succeeded with direct_password_sync=False", res2 == WriteResult.OK)
+        check("wipe timer armed when direct_password_sync is disabled", node._wipe_timer is not None)
+
+        time.sleep(0.05)
+        with winclip._Opened():
+            hist_avail2 = bool(winclip.user32.IsClipboardFormatAvailable(
+                winclip.CF_CAN_INCLUDE_IN_HISTORY))
+            hist_val2 = winclip._read_global(winclip.CF_CAN_INCLUDE_IN_HISTORY) if hist_avail2 else None
+        check("CanIncludeInClipboardHistory set when disabled", hist_avail2)
+        check("CanIncludeInClipboardHistory is 0 when disabled",
+              hist_val2 == (0).to_bytes(4, "little"))
+    finally:
+        if node._wipe_timer is not None:
+            node._wipe_timer.cancel()
+            node._wipe_timer = None
+        if orig is not None:
+            try:
+                winclip.write_text(orig)
+            except Exception:
+                pass
+
+
 def main() -> int:
     suites = [
         ("windows-endpoint-formats", test_windows_endpoint_formats),
@@ -327,6 +385,7 @@ def main() -> int:
         ("clear-clipboard-no-win-v-tile", test_clear_clipboard),
         ("timer-supersession", test_timer_supersession),
         ("local-copy-cancels-timer", test_local_copy_cancels_timer),
+        ("direct-password-sync-toggle", test_direct_password_sync_toggle),
     ]
     for name, fn in suites:
         print(f"{name}:")

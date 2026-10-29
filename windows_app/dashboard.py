@@ -24,7 +24,7 @@ KEY_PATH = os.path.join(HERE, "copyclip.key")
 
 log = logging.getLogger("copyclip.dashboard")
 
-# -- Fluent 2 Dark Design System Palette ---------------------------------------
+#: Fluent 2 Dark Design System Palette ---------------------------------------
 BG = "#0b0d13"                 # Deepest Obsidian background
 SURFACE = "#141721"            # Elevated card surface
 SURFACE_CARD = "#1a1e2b"       # Inner tile / row surface
@@ -211,7 +211,7 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
         root.minsize(580, 640)
         _apply_win11_attributes(root)
 
-        # -- Global Tk Styles --------------------------------------------------
+        #: Global Tk Styles --------------------------------------------------
         style = ttk.Style(root)
         style.theme_use("clam")
         style.configure("TScrollbar", background=SURFACE_CARD, troughcolor=BG,
@@ -827,6 +827,12 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
                                   activebackground=SURFACE, activeforeground=TEXT, font=(FONT_FAMILY, 8))
         chk_winv.pack(anchor="w", pady=(8, 0))
 
+        camera_backup_var = tk.BooleanVar(value=curr_cfg.get("camera_backup", True))
+        chk_cam = tk.Checkbutton(ss_card, text="Auto-Backup Mobile & Tablet Camera Photos (DCIM/Camera to laptop)",
+                                 variable=camera_backup_var, bg=SURFACE, fg=TEXT, selectcolor=SURFACE_CARD,
+                                 activebackground=SURFACE, activeforeground=TEXT, font=(FONT_FAMILY, 8))
+        chk_cam.pack(anchor="w", pady=(6, 0))
+
         # 3. Clipboard Sync Policies Section
         tk.Label(config_scroll_content, text="CLIPBOARD MESH POLICIES & LIMITS", bg=BG, fg=TEXT_MUTED,
                  font=(FONT_FAMILY, 9, "bold")).pack(anchor="w", pady=(10, 8))
@@ -917,6 +923,44 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
         sensitive_wipe_entry.pack(side="left", padx=(8, 12))
         tk.Label(wipe_row, text="(Default: 10s. Clears clipboard automatically on all devices)",
                  bg=SURFACE, fg=TEXT_DIM, font=(FONT_FAMILY, 8)).pack(side="left")
+
+        direct_password_sync_var = tk.BooleanVar(value=curr_cfg.get("direct_password_sync", False))
+
+        def _on_direct_password_toggle():
+            if direct_password_sync_var.get():
+                warn_msg = (
+                    "Direct Password & Re-Copy Sync\n\n"
+                    "Enabling this option will:\n"
+                    " 1. Show passwords and sensitive clips directly in Windows Clipboard History (Win+V)\n"
+                    " 2. Keep passwords in the clipboard without auto-wiping after 10 seconds\n"
+                    " 3. Allow re-copying the same text or password twice to bring it to the top of the clipboard\n\n"
+                    "Security Warning:\n"
+                    "Passwords copied from Bitwarden or password managers will be stored in your Windows Clipboard History in plain text and will not be automatically deleted.\n\n"
+                    "Do you want to enable direct password copy and re-copy sync?"
+                )
+                confirmed = messagebox.askyesno("Enable Direct Password & Re-Copy Sync", warn_msg, icon="warning")
+                if confirmed:
+                    if not allow_sensitive_var.get():
+                        allow_sensitive_var.set(True)
+                else:
+                    direct_password_sync_var.set(False)
+
+        chk_direct_pwd = tk.Checkbutton(
+            policy_card,
+            text="Direct Password & Re-Copy Sync (Show in Win+V History & Allow Repeat Copies)",
+            variable=direct_password_sync_var,
+            command=_on_direct_password_toggle,
+            bg=SURFACE, fg="#f59e0b", selectcolor=SURFACE_CARD,
+            activebackground=SURFACE, activeforeground="#f59e0b",
+            font=(FONT_FAMILY, 9, "bold")
+        )
+        chk_direct_pwd.pack(anchor="w", pady=(8, 0))
+
+        tk.Label(
+            policy_card,
+            text="Displays Bitwarden credentials in Win+V clipboard history, disables auto-wipe, and moves re-copied items to top.",
+            bg=SURFACE, fg=TEXT_DIM, font=(FONT_FAMILY, 8)
+        ).pack(anchor="w", padx=(24, 0), pady=(0, 4))
 
         # 4. Network, Timers & Security Section
         tk.Label(config_scroll_content, text="NETWORK, TIMERS & CRYPTOGRAPHIC SECURITY", bg=BG, fg=TEXT_MUTED,
@@ -1019,6 +1063,7 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
             new_cfg["devices"] = devices_list
             new_cfg["allow_images"] = allow_images_var.get()
             new_cfg["allow_sensitive"] = allow_sensitive_var.get()
+            new_cfg["direct_password_sync"] = direct_password_sync_var.get()
             new_cfg["sensitive_wipe_s"] = sens_wipe
             new_cfg["max_image_bytes"] = max_mb * 1024 * 1024
             new_cfg["screenshot_backup_dir"] = base_ss_entry.get().strip()
@@ -1028,6 +1073,7 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
                 k: e.get().strip() for k, e in custom_entries.items()
             }
             new_cfg["screenshot_exclude_from_history"] = exc_history_var.get()
+            new_cfg["camera_backup"] = camera_backup_var.get()
             new_cfg["max_chars"] = max_c
             new_cfg["adopt_on_connect"] = adopt_var.get()
             new_cfg["push_port"] = push_p

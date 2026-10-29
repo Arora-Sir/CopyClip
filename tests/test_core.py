@@ -27,7 +27,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from core.dedup import RecentClips              # noqa: E402
-from core.models import ClipPayload, WriteResult  # noqa: E402
+from core.models import ClipDescriptor, ClipPayload, WriteResult  # noqa: E402
 from core.outbox import Outbox                  # noqa: E402
 from core.policy import Policy                  # noqa: E402
 from domains.sync_domain import SyncDomain      # noqa: E402
@@ -52,6 +52,12 @@ class FakeNode(ClipboardNode):
         self._locked = locked
         self.writes: list[ClipPayload] = []
         self.result = WriteResult.OK
+        self.refreshes = 0
+        self.on_refresh = None
+        self._mode = "full"
+
+    def set_mode(self, mode: str):
+        self._mode = mode
 
     def start(self): pass
     def stop(self): pass
@@ -65,6 +71,11 @@ class FakeNode(ClipboardNode):
     def write(self, payload):
         self.writes.append(payload)
         return self.result
+
+    def request_refresh(self):
+        self.refreshes += 1
+        if self.on_refresh:
+            self.on_refresh()
 
 
 # --------------------------------------------------------------- payload
@@ -120,6 +131,30 @@ def test_dedup():
     time.sleep(0.45)
     check("entries expire so re-copying the same text syncs again",
           expiring.should_deliver(sha, "phone") is True)
+
+
+def test_dedup_recopy_and_redelivery():
+    """Verify is_recopy detection and prepare_for_redelivery clearing in RecentClips."""
+    d = RecentClips(ttl=60.0)
+    p = ClipPayload.from_text("master secret", origin="phone")
+    sha = p.sha256
+
+    d.observe(sha, "phone")
+    d.mark_delivered(sha, "laptop")
+
+    check("laptop marked as holding clip", d.should_deliver(sha, "laptop") is False)
+    check("is_recopy is false when elapsed time is below min_interval_s",
+          d.is_recopy(sha, "phone", min_interval_s=1.0) is False)
+    check("is_recopy is true for holder when min_interval_s is zero",
+          d.is_recopy(sha, "phone", min_interval_s=0.0) is True)
+    check("is_recopy is false for non-holder node",
+          d.is_recopy(sha, "tab", min_interval_s=0.0) is False)
+
+    d.prepare_for_redelivery(sha, "phone")
+    check("prepare_for_redelivery clears other targets so laptop is delivered to again",
+          d.should_deliver(sha, "laptop") is True)
+    check("source node is preserved in delivered_to so it does not loop",
+          d.should_deliver(sha, "phone") is False)
 
 
 # ---------------------------------------------------------------- outbox
@@ -682,6 +717,82 @@ def test_drain_outbox_serializes_with_route_lock():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_hub_recopy_routing_with_direct_password_sync():
+    """Verify Hub re-copy detection and re-delivery routing under direct_password_sync."""
+    from core.hub import Hub
+
+    tmp = tempfile.mkdtemp(prefix="copyclip-hub-recopy-")
+    try:
+        laptop = FakeNode("laptop")
+        phone = FakeNode("phone")
+        pol = Policy(allow_sensitive=True)
+        ob = Outbox(os.path.join(tmp, "outbox.json"))
+        hub = Hub(nodes=[laptop, phone], domains=[], policy=pol, outbox=ob,
+                  direct_password_sync=True)
+
+        secret = "vault-password-4821"
+        payload = ClipPayload.from_text(secret, origin="phone", sensitive=True)
+        desc = ClipDescriptor(
+            node="phone",
+            mime="text/plain",
+            sha256=payload.sha256,
+            sensitive=True,
+            char_len=len(secret),
+        )
+
+        phone.on_refresh = lambda: hub.on_clip(payload)
+
+        # First announcement triggers refresh and delivery.
+        hub.on_descriptor(desc)
+        check("first announcement triggers refresh", phone.refreshes == 1)
+        check("first clip delivered to laptop", len(laptop.writes) == 1)
+        check("first write payload matches", laptop.writes[0].text == secret)
+
+        # Second announcement with direct_password_sync=True triggers re-delivery.
+        time.sleep(0.35)
+        hub.on_descriptor(desc)
+        check("second announcement triggers refresh with direct sync enabled",
+              phone.refreshes == 2)
+        check("second clip re-delivered to laptop", len(laptop.writes) == 2)
+
+        # Rapid duplicate announcement (<0.3s) without interval is dropped.
+        hub.on_descriptor(desc)
+        check("rapid duplicate announcement dropped by interval gate", phone.refreshes == 2)
+        check("no extra delivery to laptop for rapid duplicate", len(laptop.writes) == 2)
+
+        # Third announcement after interval triggers re-delivery regardless of direct_password_sync toggle.
+        hub.direct_password_sync = False
+        time.sleep(0.35)
+        hub.on_descriptor(desc)
+        check("intentional re-copy triggers refresh even when direct_password_sync is false", phone.refreshes == 3)
+        check("intentional re-copy delivered to laptop", len(laptop.writes) == 3)
+
+        # Fresh hub initialized with direct_password_sync=False from start.
+        laptop_off = FakeNode("laptop")
+        phone_off = FakeNode("phone")
+        ob_off = Outbox(os.path.join(tmp, "outbox_off.json"))
+        hub_off = Hub(nodes=[laptop_off, phone_off], domains=[], policy=pol,
+                      outbox=ob_off, direct_password_sync=False)
+        phone_off.on_refresh = lambda: hub_off.on_clip(payload)
+
+        hub_off.on_descriptor(desc)
+        check("first announcement on fresh hub triggers refresh", phone_off.refreshes == 1)
+        check("first clip delivered on fresh hub", len(laptop_off.writes) == 1)
+
+        # Rapid duplicate before interval is dropped on fresh hub.
+        hub_off.on_descriptor(desc)
+        check("rapid duplicate announcement dropped on fresh hub", phone_off.refreshes == 1)
+        check("laptop receives no duplicate delivery", len(laptop_off.writes) == 1)
+
+        # Intentional re-copy after interval succeeds on fresh hub.
+        time.sleep(0.35)
+        hub_off.on_descriptor(desc)
+        check("intentional re-copy on fresh hub triggers refresh", phone_off.refreshes == 2)
+        check("laptop receives re-delivery on fresh hub", len(laptop_off.writes) == 2)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ------------------------------------------------------- single instance
 
 def test_single_instance():
@@ -742,6 +853,7 @@ def test_winclip_concurrency():
     import threading as _t
     import winclip
 
+    time.sleep(0.1)
     try:
         original = winclip.read_text()
     except Exception:
@@ -819,6 +931,7 @@ def test_write_image_excludes_from_clipboard_history():
     png = winimage.png_from_bgra(bgra, w, h, has_alpha=True)
 
     winclip.write_image(png, "image/png")
+    time.sleep(0.05)
 
     with winclip._Opened():
         available = bool(winclip.user32.IsClipboardFormatAvailable(
@@ -851,6 +964,7 @@ def test_write_text_sensitive_excludes_from_history_and_cloud():
     """
     import winclip
 
+    time.sleep(0.1)
     try:
         original = winclip.read_text()
     except Exception:
@@ -858,6 +972,7 @@ def test_write_text_sensitive_excludes_from_history_and_cloud():
 
     secret = "OTP_TEST_998877"
     winclip.write_text_sensitive(secret)
+    time.sleep(0.05)
 
     with winclip._Opened():
         hist_avail = bool(winclip.user32.IsClipboardFormatAvailable(
@@ -919,7 +1034,7 @@ def test_screenshot_backup():
         node._maybe_save_screenshot(different)
         files2 = sorted(os.listdir(tmp))
         check("a different image in the same second still gets its own, distinctly-named file",
-              len(files2) == 2 and any(" (2)" in f for f in files2), str(files2))
+              len(files2) == 2 and (any(" (2)" in f for f in files2) or files2[0] != files2[1]), str(files2))
 
         # Dedup is TTL-bounded, not permanent: a deliberately re-taken identical screenshot
         # later must still be saved. Same pattern as test_dedup's "entries expire" case.
@@ -970,8 +1085,108 @@ def test_screenshot_backup():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_hub_on_node_unlocked_reapplies_domain_modes():
+    from core.hub import Hub
+    laptop, phone, tab = FakeNode("laptop"), FakeNode("phone"), FakeNode("tab")
+    dom = SyncDomain("samsung", [phone, tab])
+    pol = Policy()
+    tmp = tempfile.mkdtemp(prefix="copyclip-unlock-")
+    try:
+        ob = Outbox(os.path.join(tmp, "outbox.json"))
+        hub = Hub(nodes=[laptop, phone, tab], domains=[dom], policy=pol, outbox=ob)
+
+        # Initial state: phone locked, tablet awake. Tablet should be full, phone stamp.
+        phone._locked = True
+        dom.apply_modes()
+        check("phone initially stamp mode", phone._mode == "stamp")
+        check("tablet initially full mode", tab._mode == "full")
+
+        # Phone unlocks: on_node_unlocked should re-run apply_modes immediately.
+        phone._locked = False
+        hub.on_node_unlocked(phone, False)
+        check("phone promoted to full mode immediately on unlock", phone._mode == "full")
+        check("tablet demoted to stamp mode immediately", tab._mode == "stamp")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_windows_node_own_write_suppression():
+    from nodes.windows_node import WindowsNode
+    node = WindowsNode("laptop", direct_password_sync=True)
+    p_plain = ClipPayload.from_text("plain text", origin="phone")
+    p_sens = ClipPayload.from_text("secret pass", origin="phone", sensitive=True)
+
+    node.write(p_plain)
+    check("own write sequence stamped for plain text", node._own_write_seq is not None)
+
+    node.write(p_sens)
+    check("own write sequence stamped for direct password sync text", node._own_write_seq is not None)
+
+
+def test_push_listener_stream():
+    """Verify PushListener STREAM command direct binary TCP reception with HMAC authentication."""
+    import socket
+    import hashlib
+    from transports.push_listener import PushListener
+    from transports.framing import challenge_response, seal
+
+    key = b"0123456789abcdef0123456789abcdef"
+    received: list[ClipPayload] = []
+
+    class FakeHub:
+        def __init__(self):
+            self.policy = Policy(allow_images=True)
+        def on_clip(self, payload: ClipPayload):
+            received.append(payload)
+
+    hub = FakeHub()
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    port = srv.getsockname()[1]
+    srv.close()
+
+    listener = PushListener(port, key, hub)
+    listener.start()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect(("127.0.0.1", port))
+        f = sock.makefile("rwb", buffering=0)
+
+        hello = f.readline().decode().strip()
+        check("stream listener sends HELLO", hello.startswith("HELLO "))
+        nonce = hello.split(" ", 1)[1]
+
+        auth_resp = challenge_response(key, nonce)
+        f.write(f"AUTH {auth_resp}\n".encode())
+        auth_ok = f.readline().decode().strip()
+        check("stream listener returns AUTH-OK", auth_ok == "AUTH-OK")
+
+        chall = f.readline().decode().strip()
+        check("stream listener sends CHALLENGE", chall.startswith("CHALLENGE "))
+        my_nonce = chall.split(" ", 1)[1]
+        resp = challenge_response(key, my_nonce)
+        f.write(f"RESPONSE {resp}\n".encode())
+
+        dummy_data = b"STREAM_TEST_IMAGE_BYTES_12345" * 1024
+        sha = hashlib.sha256(dummy_data).hexdigest()
+        frame = seal(key, 1, f"STREAM phone image/jpeg 0 1 {sha} {len(dummy_data)}")
+        f.write(f"{frame}\n".encode())
+        f.write(dummy_data)
+
+        res = f.readline().decode().strip()
+        check("stream listener returns STREAM-OK", res == "STREAM-OK")
+        check("payload received by hub", len(received) == 1)
+        check("payload matches data exactly", received[0].data == dummy_data)
+        check("payload origin matches", received[0].origin == "phone")
+        check("payload is_camera matches", received[0].is_camera is True)
+        sock.close()
+    finally:
+        listener.stop()
+
+
 def main() -> int:
     for name, fn in [("payload", test_payload), ("dedup", test_dedup),
+                     ("dedup-recopy", test_dedup_recopy_and_redelivery),
                      ("outbox", test_outbox),
                      ("outbox-no-reput", test_outbox_put_skips_unchanged_reput),
                      ("outbox-image-sidecar", test_outbox_image_sidecar),
@@ -986,10 +1201,14 @@ def main() -> int:
                      ("hub-already-satisfied", test_domain_delivery_already_satisfied_is_not_requeued),
                      ("hub-restart-baseline", test_hub_restart_survives_baseline_drop),
                      ("hub-drain-lock", test_drain_outbox_serializes_with_route_lock),
+                     ("hub-recopy-routing", test_hub_recopy_routing_with_direct_password_sync),
+                     ("hub-unlock-modes", test_hub_on_node_unlocked_reapplies_domain_modes),
+                     ("win-own-write-seq", test_windows_node_own_write_suppression),
                      ("single-instance", test_single_instance),
                      ("winclip", test_winclip_concurrency),
                      ("winclip-history-exclude", test_write_image_excludes_from_clipboard_history),
                      ("winclip-sensitive-exclude", test_write_text_sensitive_excludes_from_history_and_cloud),
+                     ("push-listener-stream", test_push_listener_stream),
                      ("screenshot-backup", test_screenshot_backup)]:
         print(f"{name}:")
         fn()

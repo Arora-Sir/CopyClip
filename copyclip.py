@@ -63,13 +63,18 @@ DEFAULT_CONFIG = {
     "allow_non_text": False,
 
     "allow_images": False,
-    "max_image_bytes": 25_165_824,
+    "max_image_bytes": 62_914_560,
     "image_chunk_bytes": 49_152,
 
     "screenshot_backup_dir": "",
     "screenshot_backup_include_devices": True,
     "screenshot_device_subfolders": True,
     "screenshot_exclude_from_history": True,
+
+    "camera_backup": True,
+    "camera_backup_dir": "",
+
+    "direct_password_sync": False,
 
     "push_port": 8387,
     "adopt_on_connect": False,
@@ -180,6 +185,9 @@ def build_hub(cfg: dict) -> Hub:
         device_screenshot_paths=cfg.get("device_screenshot_paths", {}),
         exclude_synced_images_from_history=cfg.get("screenshot_exclude_from_history", True),
         sensitive_wipe_s=wipe_s,
+        direct_password_sync=cfg.get("direct_password_sync", False),
+        camera_backup=cfg.get("camera_backup", True),
+        camera_backup_dir=cfg.get("camera_backup_dir") or None,
     )
     android: dict[str, AndroidNode] = {}
     hub_ref: dict[str, Hub] = {}
@@ -222,6 +230,7 @@ def build_hub(cfg: dict) -> Hub:
             image_chunk_bytes=cfg["image_chunk_bytes"],
             allow_sensitive=cfg.get("allow_sensitive", False),
             sensitive_wipe_s=wipe_s,
+            camera_backup=cfg.get("camera_backup", True),
             on_connect=on_connect,
             on_lock_change=on_lock_change,
         )
@@ -252,6 +261,7 @@ def build_hub(cfg: dict) -> Hub:
         dedup=RecentClips(ttl=cfg["dedup_ttl_s"]),
         baseline_store=BaselineStore(os.path.join(HERE, cfg["state_dir"], "baseline.json")),
         adopt_on_connect=cfg.get("adopt_on_connect", False),
+        direct_password_sync=cfg.get("direct_password_sync", False),
     )
     hub_ref["hub"] = hub
     return hub

@@ -1,6 +1,6 @@
 """Windows-side image codec: hand-rolled PNG encode, WIC-backed decode, DIB<->PNG.
 
-No third-party dependencies -- same constraint as winclip.py. PNG encoding is hand-rolled
+No third-party dependencies: same constraint as winclip.py. PNG encoding is hand-rolled
 (IHDR/IDAT/IEND over stdlib zlib) rather than delegated to WIC, because it must be
 **deterministic**: encoding the same pixels twice must produce the same bytes, which is
 what own-write echo suppression in nodes/windows_node.py relies on (see the image-sync
@@ -12,7 +12,7 @@ Every GUID and struct layout below was verified against the actual Windows SDK h
 installed on this machine (10.0.26100.0), not recalled from memory:
     wincodec.h  -> CLSID_WICImagingFactory1, IID_IWICImagingFactory, IWICImagingFactory /
                    IWICBitmapDecoder / IWICBitmapFrameDecode / IWICFormatConverter vtable
-                   layouts (slot order matters -- these are real COM vtables, not ones we
+                   layouts (slot order matters: these are real COM vtables, not ones we
                    define), GUID_WICPixelFormat32bppBGRA.
     wingdi.h    -> BITMAPV5HEADER field layout, LCS_sRGB (='sRGB' packed big-endian =
                    0x73524742), LCS_GM_IMAGES.
@@ -62,7 +62,7 @@ def _guid(text: str) -> GUID:
     return g
 
 
-# Verified against wincodec.h -- see module docstring.
+# Verified against wincodec.h: see module docstring.
 CLSID_WIC_IMAGING_FACTORY = _guid("cacaf262-9370-4615-a13b-9f5539da4c0a")
 IID_IWIC_IMAGING_FACTORY = _guid("ec5ec8a9-c395-4314-9c77-54d7a935ff70")
 GUID_WIC_PIXEL_FORMAT_32BPP_BGRA = _guid("6fddc324-4e03-4bfe-b185-3d77768dc90f")
@@ -87,7 +87,7 @@ kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
 kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
 
 # CoInitializeEx is per-thread (COM apartment state lives on the calling thread), so the
-# "already initialized" flag must be thread-local too -- a module-global bool here would let
+# "already initialized" flag must be thread-local too: a module-global bool here would let
 # one thread's CoInitializeEx call satisfy the check for every other thread, leaving those
 # threads' COM apartments genuinely uninitialized and CoCreateInstance failing with
 # CO_E_NOTINITIALIZED. decode() is called from multiple long-lived threads (the clipboard
@@ -113,10 +113,10 @@ def _hr_check(hr: int, what: str) -> None:
 class _Com:
     """Thin COM interface pointer: calls a vtable slot by index.
 
-    Genuine real-world COM objects, not ones we implement -- the slot index must match
+    Genuine real-world COM objects, not ones we implement: the slot index must match
     the interface's declared method order exactly (QueryInterface/AddRef/Release are
     always 0/1/2; everything after is declaration order, inherited methods first). Every
-    index used below was cross-checked against wincodec.h -- see module docstring.
+    index used below was cross-checked against wincodec.h: see module docstring.
     """
 
     __slots__ = ("ptr",)
@@ -143,7 +143,7 @@ class _Com:
 def decode(data: bytes) -> tuple[bytes, int, int]:
     """Decode arbitrary image bytes (PNG/JPEG/GIF/BMP/TIFF, plus WEBP/HEIF where an OS
     codec is installed) into (bgra_bytes, width, height), straight (non-premultiplied)
-    alpha, top-down, no row padding. Raises ImageDecodeError on any failure -- callers
+    alpha, top-down, no row padding. Raises ImageDecodeError on any failure: callers
     must treat that as "skip this image", never crash the daemon.
     """
     if not data:
@@ -260,7 +260,7 @@ def png_from_bgra(bgra: bytes, width: int, height: int, has_alpha: bool = True) 
     Deterministic by construction: filter type 0 (None) on every scanline and a fixed
     zlib level, so re-encoding identical pixels always produces identical bytes byte for
     byte. That determinism is load-bearing for own-write echo suppression in
-    nodes/windows_node.py -- a re-encode that produced different bytes would produce a
+    nodes/windows_node.py: a re-encode that produced different bytes would produce a
     different hash and the write would never recognise itself, looping forever.
     """
     if len(bgra) != width * height * 4:
@@ -303,7 +303,7 @@ def dib_to_png(dib: bytes) -> bytes:
 
     Handles BITMAPINFOHEADER (biSize=40) and BITMAPV4/V5HEADER (the width/height/
     planes/bitcount/compression fields are a common prefix across all three, per
-    wingdi.h). Only 24bpp and 32bpp are handled -- CopyClip's use case is screenshots and
+    wingdi.h). Only 24bpp and 32bpp are handled: CopyClip's use case is screenshots and
     photos, which are always one of these; paletted (<=8bpp) DIBs are out of scope.
     """
     if len(dib) < 40:
@@ -358,7 +358,7 @@ def dib_to_png(dib: bytes) -> bytes:
 def png_to_dibv5(bgra: bytes, width: int, height: int) -> bytes:
     """Build a BITMAPV5HEADER + bottom-up 32bpp BGRA pixel blob, ready for
     SetClipboardData(CF_DIBV5, ...). Alpha is preserved via an explicit BI_BITFIELDS
-    alpha mask -- this is the fix for the alpha-destroying bug found in ClipCascade's
+    alpha mask: this is the fix for the alpha-destroying bug found in ClipCascade's
     Windows paste path (`.convert("RGB")` before SetClipboardData(CF_DIB, ...)), which
     the image-sync implementation plan explicitly calls out as not to be repeated.
 
@@ -390,11 +390,43 @@ def png_to_dibv5(bgra: bytes, width: int, height: int) -> bytes:
         0, 0, 0,                  # bV5ProfileData, bV5ProfileSize, bV5Reserved
     )
 
-    row_stride = width * 4  # already 4-byte aligned at 32bpp; no padding needed
+    row_stride = width * 4
     pixels = bytearray(row_stride * height)
     for y in range(height):
-        src_row = height - 1 - y  # top-down source -> bottom-up DIB storage
+        src_row = height - 1 - y
         pixels[y * row_stride: (y + 1) * row_stride] = \
             bgra[src_row * row_stride: (src_row + 1) * row_stride]
 
     return header + bytes(pixels)
+
+
+def png_to_dib(bgra: bytes, width: int, height: int) -> bytes:
+    """Build a standard BITMAPINFOHEADER and bottom-up 32bpp BGRA pixel blob for SetClipboardData(CF_DIB, ...).
+
+    Applications such as Chrome, WhatsApp, Discord, Slack, and Paint specifically query CF_DIB.
+    Providing CF_DIB directly avoids Windows shell dynamic synthesis lag when handling Ctrl+V.
+    """
+    if len(bgra) != width * height * 4:
+        raise ValueError(f"bgra buffer size {len(bgra)} does not match {width}x{height}x4")
+
+    header = struct.pack(
+        "<IiiHHIIiiII",
+        40,                 # biSize
+        width, height,      # biWidth, biHeight (positive = bottom-up)
+        1,                  # biPlanes
+        32,                 # biBitCount
+        _BI_RGB,            # biCompression (BI_RGB = 0 for standard uncompressed 32bpp BGRA)
+        width * height * 4, # biSizeImage
+        0, 0,               # biXPelsPerMeter, biYPelsPerMeter
+        0, 0,               # biClrUsed, biClrImportant
+    )
+
+    row_stride = width * 4
+    pixels = bytearray(row_stride * height)
+    for y in range(height):
+        src_row = height - 1 - y
+        pixels[y * row_stride: (y + 1) * row_stride] = \
+            bgra[src_row * row_stride: (src_row + 1) * row_stride]
+
+    return header + bytes(pixels)
+

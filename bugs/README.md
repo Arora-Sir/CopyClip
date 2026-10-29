@@ -21,20 +21,23 @@ in real use, not merely when a test passes.
 | [BUG-011](BUG-011-pixel-screenshot-sync-and-sendclip.md) | Pixel 1 screenshot sync suppressed by `initScreenshotWatch` baseline race, 12s chunk ACK timeout, and SendClip clipboard limitation | High | **CONFIRMED, fixed and verified live on hardware (2026-09-03)** |
 | [BUG-012](BUG-012-screenshot-traversal-storm-and-battery-drain.md) | High idle CPU and flash wear: 2,912 File.listFiles() stats/sec screenshot traversal storm, keyguard polling loop, and companion app 4s config write loop | High (battery, CPU, flash wear) | **CONFIRMED, fixed and verified live on hardware (2026-09-04)** |
 | [BUG-013](BUG-013-sensitive-clip-sync-winv-blank-tile-and-timer-race.md) | Sensitive clip dropping (Google Authenticator), Win+V history blank card artifact, timer supersession race, and dashboard queue count discrepancy | High (credential sync, visual history pollution) | **CONFIRMED, fixed and verified live on hardware (2026-09-05)** |
-| [BUG-014](BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md) | Samsung long screenshot (scroll capture) syncs only the initial single-page shot; the final stitched image, written under the same filename seconds later, was never re-checked | Medium-High (incomplete image sync) | **OPEN, fix verified in live testing, awaiting real-use confirmation (2026-09-17)** |
+| [BUG-014](BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md) | Samsung long screenshot (scroll capture) syncs only the initial single-page shot. The final stitched image, written under the same filename seconds later, was never re-checked | Medium-High (incomplete image sync) | **OPEN, fix verified in live testing, awaiting real-use confirmation (2026-09-17)** |
+| [BUG-015](BUG-015-screenshot-deletion-historical-resync.md) | Deleting newest screenshot or camera photo triggers false resync of older files | Medium-High (unwanted re-sync) | **CONFIRMED, fixed and verified live on hardware (2026-10-29)** |
+| [BUG-016](BUG-016-orphaned-clipbridge-duplicate-process.md) | Wireless ADB connection drops leave orphaned ClipBridge processes running on device | Medium (duplicate polling) | **CONFIRMED, fixed and verified live on hardware (2026-10-29)** |
+| [BUG-017](BUG-017-dibv5-paste-synthesis-latency.md) | Single DIBV5 format write causes multi-second paste stall in Chromium and Electron desktop apps | Medium-High (10-second paste lag) | **CONFIRMED, fixed and verified live on hardware (2026-10-29)** |
 
 ## Companion files
 
 
-- **[DEVICE-STATE.md](DEVICE-STATE.md)** — measured baseline of both devices: settings,
+- **[DEVICE-STATE.md](DEVICE-STATE.md)**: measured baseline of both devices: settings,
   package enabled-states, `appops` clipboard permissions, running cross-device services.
   Regenerate with `python tools\device_audit.py`. It is read-only and safe to run any time.
-- **[SPIKE-IMAGE-CLIPBOARD.md](SPIKE-IMAGE-CLIPBOARD.md)** — Phase 0 device spike for image
+- **[SPIKE-IMAGE-CLIPBOARD.md](SPIKE-IMAGE-CLIPBOARD.md)**: Phase 0 device spike for image
   clipboard sync: proves `FakeContext` + `MediaStore` insert + `setPrimaryClip` works under
   `app_process` as shell UID, with two real bugs found and fixed in the ported scrcpy code.
   Two sub-questions (visual paste confirmation, reading a third-party app's clip URI) are
   **OPEN, awaiting confirmation in real use**, same convention as the bugs below.
-- **[SPIKE-PIXEL-ACCESSIBILITY.md](SPIKE-PIXEL-ACCESSIBILITY.md)** — tested whether an enabled
+- **[SPIKE-PIXEL-ACCESSIBILITY.md](SPIKE-PIXEL-ACCESSIBILITY.md)**: tested whether an enabled
   `AccessibilityService` unlocks background clipboard reads on the pixel's Android 10, the
   premise the planned pixel fallback tier depended on. **Measured false**: Android's own
   `ClipboardService` log shows a strict focus-or-system-service check with no accessibility

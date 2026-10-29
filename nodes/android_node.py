@@ -44,7 +44,7 @@ CHUNK_BYTES = 48 * 1024
 
 # Device ACKs every ACK_WINDOW chunks during a chunked write ("ACK setc <id> <idx>"), which
 # resets the stall-detection deadline. This is what keeps ack_timeout_s's "no answer in N
-# seconds means the channel is dead" guarantee meaningful at any payload size -- without
+# seconds means the channel is dead" guarantee meaningful at any payload size: without
 # it, a multi-megabyte image would only get one confirmation opportunity at the very end,
 # and a channel that died halfway through would not be noticed until the whole (pointless)
 # transfer finished sending.
@@ -68,6 +68,7 @@ class _InboundTransfer:
     total_bytes: int
     nchunks: int
     started_at: float = field(default_factory=time.time)
+    last_chunk_at: float = field(default_factory=time.time)
     chunks: list = field(default_factory=list)
 
 
@@ -75,9 +76,10 @@ class AndroidNode(ClipboardNode):
     def __init__(self, name: str, transport_factory: TransportFactory, *,
                  reconnect_min_s: float = 1.0, reconnect_max_s: float = 30.0,
                  idle_ping_s: float = 60.0, ack_timeout_s: float = 4.0,
-                 max_image_bytes: int = 25_165_824, image_chunk_bytes: int = CHUNK_BYTES,
+                 max_image_bytes: int = 62_914_560, image_chunk_bytes: int = CHUNK_BYTES,
                  allow_sensitive: bool = False,
                  sensitive_wipe_s: float = 10.0,
+                 camera_backup: bool = True,
                  on_connect: Callable[["AndroidNode"], None] | None = None,
                  on_lock_change: Callable[["AndroidNode", bool], None] | None = None) -> None:
         super().__init__(name)
@@ -90,6 +92,7 @@ class AndroidNode(ClipboardNode):
         self.image_chunk_bytes = image_chunk_bytes
         self.allow_sensitive = allow_sensitive
         self.sensitive_wipe_s = float(sensitive_wipe_s)
+        self.camera_backup = camera_backup
         self._on_connect = on_connect
         self._on_lock_change = on_lock_change
 
@@ -107,16 +110,20 @@ class AndroidNode(ClipboardNode):
         # is sufficient.
         self._ack_event = threading.Event()
         self._ack_verb: str | None = None
-        # Set on every "ACK setc <id> <idx>" during a chunked write -- a periodic liveness
+        # Set on every "ACK setc <id> <idx>" during a chunked write: a periodic liveness
         # signal distinct from _ack_event's final-confirmation role (see write()/ _handle()).
         self._chunk_ack_event = threading.Event()
         self._transfer_seq = 0
         # Reassembly state for an in-progress device-initiated image (single slot: only one
         # inbound image transfer at a time per node, matching the outbox's single-slot
-        # design for the same reason -- there is never a backlog worth keeping).
+        # design for the same reason: there is never a backlog worth keeping).
         self._inbound_transfer: _InboundTransfer | None = None
+        self.key_hex: str = ""
+        self.hub_host: str = ""
+        self.push_port: int = 8387
+        self.device_name: str = name
 
-    # -- state -------------------------------------------------------------
+    #: state -------------------------------------------------------------
 
     @property
     def available(self) -> bool:
@@ -126,7 +133,7 @@ class AndroidNode(ClipboardNode):
     def locked(self) -> bool:
         return self._locked
 
-    # -- lifecycle ---------------------------------------------------------
+    #: lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
         self._stop.clear()
@@ -180,12 +187,12 @@ class AndroidNode(ClipboardNode):
             if self._on_connect is not None:
                 # Deliberately NOT called synchronously here. on_connect (hub.py's
                 # on_node_connected) can call write() as part of catching up a queued
-                # outbox entry, and write() blocks on self._ack_event -- which is only
+                # outbox entry, and write() blocks on self._ack_event: which is only
                 # ever set inside _handle(), which is only ever called from _pump()'s
                 # loop below. Calling on_connect synchronously, before _pump() starts,
                 # was a real deadlock: the ACK line would sit in transport.inbox forever
                 # unread, the write would time out, write() would call
-                # transport.mark_dead(), forcing a reconnect -- which hit the identical
+                # transport.mark_dead(), forcing a reconnect: which hit the identical
                 # deadlock again on the very next connection, forever. Running it on its
                 # own thread lets _pump() start reading inbox immediately, so any ACK a
                 # catch-up write is waiting on actually gets delivered.
@@ -218,17 +225,29 @@ class AndroidNode(ClipboardNode):
     def _send_conf(self) -> None:
         """Send current configuration to ClipBridge via CONF command."""
         try:
-            payload = json.dumps({
+            cfg_dict = {
                 "allow_sensitive": bool(self.allow_sensitive),
                 "sensitive_wipe_s": int(self.sensitive_wipe_s),
-            })
+                "camera_backup": bool(self.camera_backup),
+                "max_image_bytes": int(self.max_image_bytes),
+            }
+            if self.key_hex:
+                cfg_dict["key_hex"] = self.key_hex
+            if self.hub_host:
+                cfg_dict["hub_host"] = self.hub_host
+            if self.push_port:
+                cfg_dict["push_port"] = self.push_port
+            if self.device_name:
+                cfg_dict["device_name"] = self.device_name
+            payload = json.dumps(cfg_dict)
             b64 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
             with self._lock:
                 transport = self._transport
                 if transport is not None and transport.alive():
                     transport.send_line(f"CONF {b64}")
-            log.debug("[%s] sent CONF allow_sensitive=%s wipe_s=%.0f",
-                      self.name, self.allow_sensitive, self.sensitive_wipe_s)
+            log.debug("[%s] sent CONF allow_sensitive=%s wipe_s=%.0f camera_backup=%s hub=%s:%s",
+                      self.name, self.allow_sensitive, self.sensitive_wipe_s, self.camera_backup,
+                      self.hub_host, self.push_port)
         except Exception as exc:
             log.warning("[%s] failed to send CONF: %s", self.name, exc)
 
@@ -240,6 +259,11 @@ class AndroidNode(ClipboardNode):
     def set_sensitive_wipe_s(self, wipe_s: float) -> None:
         """Update sensitive_wipe_s setting and resend CONF to live ClipBridge."""
         self.sensitive_wipe_s = float(wipe_s)
+        self._send_conf()
+
+    def set_camera_backup(self, enable: bool) -> None:
+        """Update camera_backup setting and resend CONF to live ClipBridge."""
+        self.camera_backup = bool(enable)
         self._send_conf()
 
     def _pump(self, transport) -> None:
@@ -262,7 +286,7 @@ class AndroidNode(ClipboardNode):
                     log.warning("[%s] no PING response; treating channel as dead", self.name)
                     return
                 t = self._inbound_transfer
-                if t is not None and time.time() - t.started_at > _INBOUND_STALE_S:
+                if t is not None and time.time() - t.last_chunk_at > _INBOUND_STALE_S:
                     log.warning("[%s] abandoned inbound image transfer %s (%d/%d chunks); "
                                 "dropping", self.name, t.transfer_id, len(t.chunks), t.nchunks)
                     self._inbound_transfer = None
@@ -277,7 +301,7 @@ class AndroidNode(ClipboardNode):
             except Exception:
                 log.exception("[%s] frame handling failed", self.name)
 
-    # -- protocol ----------------------------------------------------------
+    #: protocol ----------------------------------------------------------
 
     def _handle(self, line: str) -> None:
         verb, _, rest = line.partition(" ")
@@ -313,7 +337,7 @@ class AndroidNode(ClipboardNode):
             self._emit_desc(descriptor)
 
         elif verb == "CLIPB":
-            # "CLIPB <id> <mime> <sens> <sha256> <bytes> <nchunks>" -- header for a
+            # "CLIPB <id> <mime> <sens> <sha256> <bytes> <nchunks>": header for a
             # device-initiated chunked image. A fresh id always discards any transfer
             # already in progress: there is never a backlog worth keeping (same reasoning
             # as the outbox's single-slot design).
@@ -362,6 +386,7 @@ class AndroidNode(ClipboardNode):
                 self._inbound_transfer = None
                 return
             t.chunks.append(chunk_b64)
+            t.last_chunk_at = time.time()
             if len(t.chunks) == t.nchunks:
                 self._finish_inbound_transfer(t)
                 self._inbound_transfer = None
@@ -388,7 +413,7 @@ class AndroidNode(ClipboardNode):
         elif verb == "DEFER":
             # Normal whenever the device is in your pocket; ClipBridge replays on unlock.
             log.info("[%s] write deferred (%s); will apply on unlock", self.name, rest.strip())
-            # A DEFER is just as much proof the channel is alive as an ACK -- the write
+            # A DEFER is just as much proof the channel is alive as an ACK: the write
             # reached ClipBridge, it just needs replaying later. Confirms a pending write().
             deferred_verb = rest.strip().split(" ", 1)[0]
             if self._ack_verb is not None and deferred_verb == self._ack_verb:
@@ -400,7 +425,7 @@ class AndroidNode(ClipboardNode):
         elif verb == "ERR":
             reason = rest.strip()
             if reason.startswith("chunk "):
-                # "ERR chunk <id> <reason>" -- the device aborted a chunked write it was
+                # "ERR chunk <id> <reason>": the device aborted a chunked write it was
                 # receiving (hash mismatch, oversize, gap). No fast-path abort here: the
                 # in-flight write() loop's periodic ACK wait already fails within one
                 # ack_timeout_s window when no further "ACK setc" arrives, which is a
@@ -410,12 +435,12 @@ class AndroidNode(ClipboardNode):
                 log.warning("[%s] bridge error: %s", self.name, reason)
 
         elif verb == "ACK":
-            # Confirms a pending write() -- see the timeout-based fallback in write() for
+            # Confirms a pending write(): see the timeout-based fallback in write() for
             # why a write can no longer be assumed to have succeeded just because the local
             # pipe write didn't raise.
             acked_verb = rest.strip().split(" ", 1)[0]
             if acked_verb == "setc":
-                # "ACK setc <id> <idx>" -- periodic liveness ping during a chunked write.
+                # "ACK setc <id> <idx>": periodic liveness ping during a chunked write.
                 # Resets write()'s stall-detection deadline; it is NOT the transfer's final
                 # confirmation, which arrives separately as a plain "ACK set" once the
                 # device has reassembled, verified and applied every chunk.
@@ -432,14 +457,15 @@ class AndroidNode(ClipboardNode):
 
     def _finish_inbound_transfer(self, t: _InboundTransfer) -> None:
         try:
+            is_cam = t.transfer_id.startswith("cam-")
             payload = ClipPayload.from_b64("".join(t.chunks), mime=t.mime, origin=self.name,
-                                           sensitive=t.sensitive)
+                                           sensitive=t.sensitive, is_camera=is_cam)
         except Exception:
             log.exception("[%s] undecodable chunked image payload %s", self.name,
                           t.transfer_id)
             return
         # sha256 is verified against the reassembled bytes before anything downstream ever
-        # sees this payload -- a gap or corruption fails closed rather than applying a
+        # sees this payload: a gap or corruption fails closed rather than applying a
         # truncated or garbled image.
         if payload.sha256 != t.sha256:
             log.warning("[%s] chunked image %s failed sha256 verification "
@@ -450,7 +476,7 @@ class AndroidNode(ClipboardNode):
                  self.name, t.transfer_id, payload.size, t.nchunks)
         self._emit(payload)
 
-    # -- io ----------------------------------------------------------------
+    #: io ----------------------------------------------------------------
 
     def write(self, payload: ClipPayload) -> str:
         if payload.is_image:
@@ -474,7 +500,7 @@ class AndroidNode(ClipboardNode):
             return WriteResult.FAILED
 
         # A successful local pipe write proves nothing about whether the phone actually
-        # got it -- that pipe is to the local adb process, not to the device. Wait for
+        # got it: that pipe is to the local adb process, not to the device. Wait for
         # ClipBridge's own ACK/DEFER before calling this delivered; a real round trip over
         # this protocol measures well under a second, so a multi-second silence means the
         # channel is dead, not just slow.
@@ -492,7 +518,7 @@ class AndroidNode(ClipboardNode):
 
     def _write_chunked(self, payload: ClipPayload) -> str:
         """Image write path: SETB header + SETC chunks. Text's single-line SET path above
-        is completely untouched by this -- it is a parallel code path, not a shared one.
+        is completely untouched by this: it is a parallel code path, not a shared one.
         """
         with self._lock:
             transport = self._transport
@@ -597,20 +623,9 @@ class AndroidNode(ClipboardNode):
 
     def send_conf(self, key_hex: str, hub_host: str, push_port: int, device_name: str) -> None:
         """Pushes auto-provisioning configuration to the device over the secure transport."""
-        with self._lock:
-            transport = self._transport
-        if transport is None:
-            return
-        try:
-            payload = json.dumps({
-                "key_hex": key_hex,
-                "hub_host": hub_host,
-                "push_port": push_port,
-                "device_name": device_name,
-            })
-            b64 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
-            transport.send_line(f"CONF {b64}")
-            log.debug("[%s] sent CONF auto-provisioning payload", self.name)
-        except Exception as e:
-            log.warning("[%s] failed to send CONF: %s", self.name, e)
+        self.key_hex = key_hex
+        self.hub_host = hub_host
+        self.push_port = push_port
+        self.device_name = device_name
+        self._send_conf()
 

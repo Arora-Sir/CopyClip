@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 class _Entry:
     origin: str
     first_seen: float
+    last_seen: float = 0.0
     delivered_to: set[str] = field(default_factory=set)
 
 
@@ -41,7 +42,7 @@ class RecentClips:
         self._entries: dict[str, _Entry] = {}
         self._lock = threading.Lock()
 
-    # -- observation -------------------------------------------------------
+    #: observation -------------------------------------------------------
 
     def observe(self, sha: str, node: str, *, origin: bool = False) -> bool:
         """Record that `node` holds this clip.
@@ -56,8 +57,10 @@ class RecentClips:
             if entry is None:
                 self._entries[sha] = _Entry(origin=node if origin else node,
                                             first_seen=now,
+                                            last_seen=now,
                                             delivered_to={node})
                 return True
+            entry.last_seen = now
             entry.delivered_to.add(node)
             return False
 
@@ -77,12 +80,36 @@ class RecentClips:
 
     def mark_delivered(self, sha: str, node: str) -> None:
         with self._lock:
+            now = time.time()
             entry = self._entries.get(sha)
             if entry is None:
-                self._entries[sha] = _Entry(origin=node, first_seen=time.time(),
+                self._entries[sha] = _Entry(origin=node, first_seen=now,
+                                            last_seen=now,
                                             delivered_to={node})
             else:
+                entry.last_seen = now
                 entry.delivered_to.add(node)
+
+    def is_recopy(self, sha: str, node: str, min_interval_s: float = 0.3) -> bool:
+        """True when node already held this clip and is announcing it again after min_interval_s."""
+        with self._lock:
+            entry = self._entries.get(sha)
+            if entry is None:
+                return False
+            now = time.time()
+            is_holder = (entry.origin == node) or (node in entry.delivered_to)
+            has_elapsed = (now - entry.last_seen) >= min_interval_s
+            return is_holder and has_elapsed
+
+    def prepare_for_redelivery(self, sha: str, source_node: str) -> None:
+        """Clear delivered_to except source_node, so other nodes can receive the update."""
+        with self._lock:
+            entry = self._entries.get(sha)
+            if entry is not None:
+                now = time.time()
+                entry.last_seen = now
+                entry.origin = source_node
+                entry.delivered_to = {source_node}
 
     def origin_of(self, sha: str) -> str | None:
         with self._lock:
@@ -94,7 +121,7 @@ class RecentClips:
             self._prune(time.time())
             return sha in self._entries
 
-    # -- housekeeping ------------------------------------------------------
+    #: housekeeping ------------------------------------------------------
 
     def _prune(self, now: float) -> None:
         """Caller must hold the lock."""

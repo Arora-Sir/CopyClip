@@ -25,6 +25,7 @@ CF_DIBV5 = 17
 GMEM_MOVEABLE = 0x0002
 WM_CLIPBOARDUPDATE = 0x031D
 WM_DESTROY = 0x0002
+WM_TIMER = 0x0113
 HWND_MESSAGE = wintypes.HWND(-3)
 
 LRESULT = ctypes.c_ssize_t
@@ -93,6 +94,10 @@ user32.DispatchMessageW.restype = LRESULT
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
                                 wintypes.WPARAM, wintypes.LPARAM]
 user32.PostMessageW.restype = wintypes.BOOL
+user32.SetTimer.argtypes = [wintypes.HWND, ctypes.c_size_t, wintypes.UINT, ctypes.c_void_p]
+user32.SetTimer.restype = ctypes.c_size_t
+user32.KillTimer.argtypes = [wintypes.HWND, ctypes.c_size_t]
+user32.KillTimer.restype = wintypes.BOOL
 kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
@@ -133,7 +138,7 @@ _owner_hwnd = None
 # Registered clipboard formats for pass-through image bytes. Registered once at import;
 # RegisterClipboardFormatW is idempotent and returns the same id on every call once a name
 # is registered process-wide, so this is safe to call unconditionally. "JFIF" and "GIF" are
-# the actual names Windows and other apps (browsers, Office, Paint) use for these -- not
+# the actual names Windows and other apps (browsers, Office, Paint) use for these: not
 # invented here.
 CF_PNG = user32.RegisterClipboardFormatW("PNG")
 CF_JFIF = user32.RegisterClipboardFormatW("JFIF")
@@ -147,11 +152,11 @@ _REGISTERED_MIME = {
 _MIME_REGISTERED = {v: k for k, v in _REGISTERED_MIME.items()}
 
 # Set alongside an image in write_image() (DWORD 0) to tell Windows' Clipboard History
-# service to skip that item entirely -- a large device-synced screenshot was observed
+# service to skip that item entirely: a large device-synced screenshot was observed
 # evicting the user's existing History entries (see ARCHITECTURE.md's "Two entries in
 # Windows Clipboard History" note and bugs/BUG-005's Open points for the full
 # investigation); this trades away that one image's own History visibility (Ctrl+V still
-# pastes it correctly -- this only affects History's bookkeeping, never the live clipboard)
+# pastes it correctly: this only affects History's bookkeeping, never the live clipboard)
 # in exchange for not disturbing the rest of the user's history.
 CF_CAN_INCLUDE_IN_HISTORY = user32.RegisterClipboardFormatW("CanIncludeInClipboardHistory")
 CF_CAN_UPLOAD_TO_CLOUD = user32.RegisterClipboardFormatW("CanUploadToCloudClipboard")
@@ -244,7 +249,7 @@ def read_image() -> tuple[bytes, str] | None:
     """Current clipboard image as (bytes, mime), or None when it holds no image.
 
     Preference order: a registered pass-through format (PNG/JFIF/GIF) first, because that
-    is the *original* encoded bytes exactly as whatever app put them there -- lossless,
+    is the *original* encoded bytes exactly as whatever app put them there: lossless,
     no re-encode, no bloat. Only falls back to CF_DIBV5/CF_DIB (converted to PNG via
     winimage) when no registered format is present, which happens for apps that only ever
     set the DIB formats (e.g. a plain screenshot tool, or MS Paint on some versions).
@@ -293,8 +298,8 @@ def _write_once(items: list[tuple[int, bytes]]) -> None:
     """One open-empty-alloc-set(-set...)-close cycle. Raises on any failure.
 
     Accepts multiple (format_id, data) pairs so several formats can be set for one
-    clipboard ownership -- e.g. CF_DIBV5 plus a registered pass-through format for one
-    image -- in a single atomic-looking operation, exactly as write_text() already does
+    clipboard ownership: e.g. CF_DIBV5 plus a registered pass-through format for one
+    image: in a single atomic-looking operation, exactly as write_text() already does
     for its single CF_UNICODETEXT item.
     """
     with _Opened():
@@ -371,7 +376,7 @@ def clear_clipboard(attempts: int = 4) -> int:
                         f"EmptyClipboard failed (err={ctypes.get_last_error()})"
                     )
             # Sequence number advances when EmptyClipboard succeeds. Read it while
-            # the lock is released -- no clipboard ownership needed for this call.
+            # the lock is released: no clipboard ownership needed for this call.
             return sequence_number()
         except (OSError, ClipboardBusy) as exc:
             last = exc
@@ -394,19 +399,20 @@ def write_image(data: bytes, mime: str, attempts: int = 4, *,
     preserved) so *any* app that only understands the DIB formats can paste it, plus
     the original bytes under the matching registered format (PNG/JFIF/GIF) when one
     exists, for a byte-identical, no-re-encode round trip in apps that prefer it, plus
-    -- when `exclude_from_history` is true (the default) -- CF_CAN_INCLUDE_IN_HISTORY=0
+: when `exclude_from_history` is true (the default): CF_CAN_INCLUDE_IN_HISTORY=0
     so this image doesn't show up in (or evict entries from) Windows Clipboard History.
     Ctrl+V always pastes it normally either way; the flag only affects History's own
     bookkeeping. See config.json's `screenshot_exclude_from_history` and
     bugs/BUG-005-duplicate-screenshot-push.md's Open points for why this exists.
 
     Raises winimage.ImageDecodeError if `data` cannot be decoded (corrupt bytes, or a
-    format WIC has no codec for) -- callers must treat that as a failed write, not crash.
+    format WIC has no codec for): callers must treat that as a failed write, not crash.
     """
     bgra, width, height = winimage.decode(data)
     dibv5 = winimage.png_to_dibv5(bgra, width, height)
+    dib = winimage.png_to_dib(bgra, width, height)
 
-    items: list[tuple[int, bytes]] = [(CF_DIBV5, dibv5)]
+    items: list[tuple[int, bytes]] = [(CF_DIBV5, dibv5), (CF_DIB, dib)]
     registered_fmt = _MIME_REGISTERED.get(mime)
     if registered_fmt:
         items.append((registered_fmt, data))
@@ -431,6 +437,7 @@ class ClipboardWatcher:
         self._thread: threading.Thread | None = None
         self._hwnd = None
         self._wndproc_ref = None  # must outlive the window or Windows calls freed memory
+        self._last_seen_seq = 0
         self.mode = "listener"
 
     def start(self) -> None:
@@ -452,13 +459,24 @@ class ClipboardWatcher:
 
     def _run_listener(self) -> None:
         global _owner_hwnd
+        self._last_seen_seq = sequence_number()
 
         def wndproc(hwnd, msg, wparam, lparam):
             if msg == WM_CLIPBOARDUPDATE:
+                self._last_seen_seq = sequence_number()
                 try:
                     self.on_change()
                 except Exception:
                     log.exception("clipboard callback failed")
+                return 0
+            if msg == WM_TIMER:
+                curr = sequence_number()
+                if curr != self._last_seen_seq:
+                    self._last_seen_seq = curr
+                    try:
+                        self.on_change()
+                    except Exception:
+                        log.exception("clipboard timer poll failed")
                 return 0
             return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
@@ -475,7 +493,7 @@ class ClipboardWatcher:
                 raise OSError(f"RegisterClassW failed (err={err})")
 
         self._hwnd = user32.CreateWindowExW(0, "CopyClipListener", "CopyClip", 0, 0, 0, 0, 0,
-                                            HWND_MESSAGE, None, hinst, None)
+                                            None, None, hinst, None)
         if not self._hwnd:
             raise OSError(f"CreateWindowExW failed (err={ctypes.get_last_error()})")
 
@@ -484,7 +502,8 @@ class ClipboardWatcher:
         if not user32.AddClipboardFormatListener(self._hwnd):
             raise OSError(f"AddClipboardFormatListener failed (err={ctypes.get_last_error()})")
 
-        log.info("clipboard listener active (event driven)")
+        user32.SetTimer(self._hwnd, 1, 1000, None)
+        log.info("clipboard listener active (event driven with timer watchdog)")
         msg = wintypes.MSG()
         while not self._stop.is_set():
             got = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
@@ -493,6 +512,7 @@ class ClipboardWatcher:
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
 
+        user32.KillTimer(self._hwnd, 1)
         user32.RemoveClipboardFormatListener(self._hwnd)
         if _owner_hwnd == self._hwnd:
             _owner_hwnd = None

@@ -22,7 +22,7 @@ from .base import ClipboardNode
 
 log = logging.getLogger("copyclip.node.windows")
 
-# Mirrors android/ClipBridge.java's extensionForMime() -- same mime set (core/models.py's
+# Mirrors android/ClipBridge.java's extensionForMime(): same mime set (core/models.py's
 # IMAGE_MIMES), same default-to-PNG fallback.
 _IMAGE_EXTENSIONS = {
     "image/jpeg": ".jpg",
@@ -38,7 +38,10 @@ class WindowsNode(ClipboardNode):
                  screenshot_device_subfolders: bool = True,
                  device_screenshot_paths: dict[str, str] | None = None,
                  exclude_synced_images_from_history: bool = True,
-                 sensitive_wipe_s: float = 10.0) -> None:
+                 sensitive_wipe_s: float = 10.0,
+                 direct_password_sync: bool = False,
+                 camera_backup: bool = True,
+                 camera_backup_dir: str | None = None) -> None:
         super().__init__(name)
         self._watcher: winclip.ClipboardWatcher | None = None
         self._running = False
@@ -52,6 +55,9 @@ class WindowsNode(ClipboardNode):
         self._exclude_synced_images_from_history = exclude_synced_images_from_history
         self._screenshot_dedup = RecentClips(ttl=20.0)
         self.sensitive_wipe_s = float(sensitive_wipe_s)
+        self.direct_password_sync = direct_password_sync
+        self._camera_backup = camera_backup
+        self._camera_backup_dir = camera_backup_dir or None
         self._wipe_timer: threading.Timer | None = None
 
     def update_config(self, *, screenshot_dir: str | None = None,
@@ -59,7 +65,10 @@ class WindowsNode(ClipboardNode):
                       screenshot_device_subfolders: bool = True,
                       device_screenshot_paths: dict[str, str] | None = None,
                       exclude_synced_images_from_history: bool = True,
-                      sensitive_wipe_s: float | None = None) -> None:
+                      sensitive_wipe_s: float | None = None,
+                      direct_password_sync: bool | None = None,
+                      camera_backup: bool | None = None,
+                      camera_backup_dir: str | None = None) -> None:
         """Hot-reloads screenshot directories and options at runtime without restart."""
         self._screenshot_dir = screenshot_dir or None
         self._screenshot_include_devices = screenshot_include_devices
@@ -68,11 +77,17 @@ class WindowsNode(ClipboardNode):
         self._exclude_synced_images_from_history = exclude_synced_images_from_history
         if sensitive_wipe_s is not None:
             self.sensitive_wipe_s = float(sensitive_wipe_s)
-        log.info("[%s] runtime configuration updated (dir=%s, subfolders=%s, custom=%s)",
+        if direct_password_sync is not None:
+            self.direct_password_sync = direct_password_sync
+        if camera_backup is not None:
+            self._camera_backup = camera_backup
+        if camera_backup_dir is not None:
+            self._camera_backup_dir = camera_backup_dir or None
+        log.info("[%s] runtime configuration updated (dir=%s, subfolders=%s, custom=%s, camera_backup=%s)",
                  self.name, self._screenshot_dir, self._screenshot_device_subfolders,
-                 list(self._device_screenshot_paths.keys()))
+                 list(self._device_screenshot_paths.keys()), self._camera_backup)
 
-    # -- lifecycle ---------------------------------------------------------
+    #: lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
         self._watcher = winclip.ClipboardWatcher(self._on_change)
@@ -93,7 +108,7 @@ class WindowsNode(ClipboardNode):
     def available(self) -> bool:
         return self._running
 
-    # -- io ----------------------------------------------------------------
+    #: io ----------------------------------------------------------------
 
     def _read(self) -> ClipPayload | None:
         try:
@@ -109,7 +124,7 @@ class WindowsNode(ClipboardNode):
         if text is not None:
             return ClipPayload.from_text(text, origin=self.name)
 
-        # No text: check for an image. Ordering matters -- a browser copy that carries
+        # No text: check for an image. Ordering matters: a browser copy that carries
         # both text and an image html fragment must still sync as text, which the check
         # above already guarantees.
         try:
@@ -151,17 +166,17 @@ class WindowsNode(ClipboardNode):
         if payload is not None and payload.size:
             self._emit(payload)
 
-    # -- local screenshot backup --------------------------------------------
+    #: local screenshot backup --------------------------------------------
 
     def _maybe_save_screenshot(self, payload: ClipPayload) -> None:
         """Best-effort local file copy of an image clip. Never raises, never blocks or
-        delays sync -- a failure here (bad path, permissions, disk full) is a lost
+        delays sync: a failure here (bad path, permissions, disk full) is a lost
         convenience copy, not a lost sync, so it only ever logs and moves on.
         """
         if not self._screenshot_dir:
             return
         if not self._screenshot_dedup.observe(payload.sha256, "local"):
-            # Same image saved moments ago -- either Windows genuinely fired the
+            # Same image saved moments ago: either Windows genuinely fired the
             # clipboard-changed notification twice for one snip (ARCHITECTURE.md's "Two
             # entries in Windows Clipboard History" note), or this is write()'s own-write
             # echo racing _on_change() (the watcher thread can see the change before
@@ -208,6 +223,33 @@ class WindowsNode(ClipboardNode):
         except Exception:
             log.warning("[%s] screenshot backup failed", self.name, exc_info=True)
 
+    def _save_camera_photo(self, payload: ClipPayload) -> None:
+        if not self._screenshot_dir or not self._camera_backup:
+            return
+        camera_dir = self._camera_backup_dir or os.path.join(self._screenshot_dir, "Camera")
+        try:
+            os.makedirs(camera_dir, exist_ok=True)
+            ext = ".jpg"
+            if payload.mime == "image/png":
+                ext = ".png"
+            elif payload.mime in ("image/heic", "image/heif"):
+                ext = ".heic"
+            elif payload.mime == "image/webp":
+                ext = ".webp"
+            now = time.strftime("%Y-%m-%d %H%M%S")
+            origin_tag = f"_{payload.origin}" if payload.origin else ""
+            filename = f"Photo {now}{origin_tag}{ext}"
+            path = os.path.join(camera_dir, filename)
+            idx = 2
+            while os.path.exists(path):
+                path = os.path.join(camera_dir, f"Photo {now}{origin_tag} ({idx}){ext}")
+                idx += 1
+            with open(path, "wb") as f:
+                f.write(payload.data)
+            log.info("[%s] camera photo backed up to %s (%d bytes)", self.name, path, len(payload.data))
+        except Exception:
+            log.warning("[%s] camera photo backup failed", self.name, exc_info=True)
+
     def _wipe_sensitive(self, target_seq: int) -> None:
         """Clear sensitive text from clipboard if it has not been superseded.
 
@@ -234,6 +276,10 @@ class WindowsNode(ClipboardNode):
 
 
     def write(self, payload: ClipPayload) -> str:
+        if payload.is_camera:
+            self._save_camera_photo(payload)
+            return WriteResult.OK
+
         if payload.is_image:
             if self._screenshot_include_devices:
                 self._maybe_save_screenshot(payload)
@@ -247,7 +293,7 @@ class WindowsNode(ClipboardNode):
                         payload.data, payload.mime,
                         exclude_from_history=self._exclude_synced_images_from_history)
                     # Own-write suppression: winimage's PNG encoder is deterministic, so a
-                    # read-back of our own write always matches what we just sent -- there is
+                    # read-back of our own write always matches what we just sent: there is
                     # nothing new to report when the watcher fires for this exact write.
                     self._own_write_seq = winclip.sequence_number()
                 return WriteResult.OK
@@ -264,22 +310,31 @@ class WindowsNode(ClipboardNode):
         try:
             with self._write_lock:
                 if payload.sensitive:
-                    winclip.write_text_sensitive(text)
-                    seq = winclip.sequence_number()
-                    self._own_write_seq = seq
-                    if self._wipe_timer is not None:
-                        self._wipe_timer.cancel()
-                    wipe_s = max(1.0, float(self.sensitive_wipe_s))
-                    self._wipe_timer = threading.Timer(wipe_s, self._wipe_sensitive, args=(seq,))
-                    self._wipe_timer.daemon = True
-                    self._wipe_timer.start()
-                    log.info("[%s] wrote sensitive text; auto-wipe timer armed (%.0fs)", self.name, wipe_s)
+                    if self.direct_password_sync:
+                        if self._wipe_timer is not None:
+                            self._wipe_timer.cancel()
+                            self._wipe_timer = None
+                        winclip.write_text(text)
+                        self._own_write_seq = winclip.sequence_number()
+                        log.info("[%s] wrote sensitive text directly (Win+V history enabled, no auto-wipe)", self.name)
+                    else:
+                        winclip.write_text_sensitive(text)
+                        seq = winclip.sequence_number()
+                        self._own_write_seq = seq
+                        if self._wipe_timer is not None:
+                            self._wipe_timer.cancel()
+                        wipe_s = max(1.0, float(self.sensitive_wipe_s))
+                        self._wipe_timer = threading.Timer(wipe_s, self._wipe_sensitive, args=(seq,))
+                        self._wipe_timer.daemon = True
+                        self._wipe_timer.start()
+                        log.info("[%s] wrote sensitive text; auto-wipe timer armed (%.0fs)", self.name, wipe_s)
                 else:
                     # Cancel any pending sensitive-wipe: non-sensitive content supersedes it.
                     if self._wipe_timer is not None:
                         self._wipe_timer.cancel()
                         self._wipe_timer = None
                     winclip.write_text(text)
+                    self._own_write_seq = winclip.sequence_number()
             return WriteResult.OK
         except Exception:
             log.exception("[%s] write failed", self.name)

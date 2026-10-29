@@ -58,11 +58,14 @@ class AdbTransport(Transport):
 
     def _ensure_connected(self) -> None:
         # `adb connect` is idempotent and cheap; it re-establishes after a Tailscale blip.
-        res = subprocess.run(
-            [self.adb, "connect", self.device],
-            capture_output=True, text=True, timeout=self.connect_timeout,
-            creationflags=_NO_WINDOW,
-        )
+        try:
+            res = subprocess.run(
+                [self.adb, "connect", self.device],
+                capture_output=True, text=True, timeout=self.connect_timeout,
+                creationflags=_NO_WINDOW,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TransportError(f"adb connect {self.device} timed out after {self.connect_timeout}s") from exc
         blob = (res.stdout + res.stderr).lower()
         if "connected" not in blob:
             raise TransportError(
@@ -99,6 +102,10 @@ class AdbTransport(Transport):
 
     def start(self) -> None:
         self._ensure_connected()
+        try:
+            self._adb("shell", "pkill -f me.mohit.copyclip.ClipBridge 2>/dev/null || true", timeout=5)
+        except Exception:
+            pass
         self._push_dex()
 
         # -T disables PTY allocation. Without it adb rewrites \n as \r\n on the way out,
