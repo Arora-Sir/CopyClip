@@ -63,7 +63,7 @@ without reading the relevant section is how a proven mechanism quietly breaks.
   entirely and is written to directly, same as the laptop.
 - `android/ClipBridge.java` — the on-device helper, rebuilt with `android/build_dex.ps1`.
 - `bugs/` — dated incident writeups and device spikes, all with measured evidence.
-- `tests/` — `test_core.py`/`test_android_node.py`/`test_imaging.py` are pure logic, no
+- `tests/` — `test_core.py`/`test_android_node.py`/`test_imaging.py`/`test_dashboard_ui.py` are pure logic, no
   devices, run in under a second; `test_e2e.py`/`test_three_device.py` need real hardware.
 
 ## Project Skills

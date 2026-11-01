@@ -472,8 +472,12 @@ class AndroidNode(ClipboardNode):
 
         elif verb == "STREAM-PORT":
             try:
-                self._stream_port = int(rest.strip())
-                log.info("[%s] direct reverse stream listener ready on port %d", self.name, self._stream_port)
+                new_port = int(rest.strip())
+                if self._stream_port != new_port:
+                    self._stream_port = new_port
+                    log.info("[%s] direct reverse stream listener ready on port %d", self.name, self._stream_port)
+                else:
+                    log.debug("[%s] direct reverse stream listener confirmed on port %d", self.name, self._stream_port)
             except ValueError:
                 pass
 

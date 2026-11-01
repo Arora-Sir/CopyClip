@@ -74,6 +74,7 @@ DEFAULT_CONFIG = {
     "camera_backup": True,
     "camera_backup_dir": "",
 
+    "allow_recopy": True,
     "direct_password_sync": False,
 
     "push_port": 8387,
@@ -263,6 +264,7 @@ def build_hub(cfg: dict) -> Hub:
         baseline_store=BaselineStore(os.path.join(HERE, cfg["state_dir"], "baseline.json")),
         adopt_on_connect=cfg.get("adopt_on_connect", False),
         direct_password_sync=cfg.get("direct_password_sync", False),
+        allow_recopy=cfg.get("allow_recopy", True),
     )
     hub_ref["hub"] = hub
     return hub

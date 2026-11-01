@@ -729,6 +729,7 @@ reason: changing one is a real tradeoff, not a free lunch.
 
 | `allow_sensitive` | `false` | Whether clips tagged sensitive (Android `EXTRA_IS_SENSITIVE`) are allowed to sync (§9.1) | Defaults `false` for defense-in-depth; when `true`, sensitive clips sync with RAM-only outbox, Win+V exclusion, and clean auto-wipe |
 | `sensitive_wipe_s` | `10.0` | How long in seconds before a synced sensitive clip is wiped from the clipboard (§9.1) | Lower = smaller window of credential exposure on the clipboard; higher = more time to paste into a 2FA prompt |
+| `allow_recopy` | `true` | Whether re-copying the same text, link, or item after 0.3s refreshes it across the mesh (§6.7e) | When `true`, intentional duplicate copies bypass the 90s dedup window and refresh to top |
 | `direct_password_sync` | `false` | Whether sensitive clips bypass auto-wipe and history exclusion (§6.7e) | When `true`, passwords persist in clipboard history and intentional duplicate copies refresh immediately |
 | `camera_backup` | `false` | Whether photos captured in `/sdcard/DCIM/Camera` auto-sync to laptop (§6.7b) | Syncs camera media directly to the designated backup folder without affecting the active clipboard |
 | `camera_backup_dir` | `""` | Local destination directory for synced camera photos (§6.7b) | Defaults to `Temporary Screenshots\Camera` when left empty |
@@ -1055,9 +1056,30 @@ before Tk initialization in `copyclip.py`, `tray.py`, and `dashboard.py`. Sent `
 *Symptom:* Dashboard status showed "1 Outbox Queued" permanently in amber warning text even though
 all 3 devices were online and syncing cleanly. *Root cause:* Dashboard was reading
 `hub.stats["queued"]`, which is a cumulative lifetime counter incremented every time any clip is
-enqueued; it is never decremented when items drain. *Fix:* Switched dashboard refresh to read
+enqueued. It is never decremented when items drain. *Fix:* Switched dashboard refresh to read
 `active_queued = len(status.get("outbox", []))`, switching dynamically between amber warning (>0)
 and muted grey (0).
+
+**(2026-11-01) Dashboard Outbox Queued node context, camera backup directory UI, and sensitive sync gating.**
+*Symptom:* Dashboard displayed a generic amber "1 Outbox Queued" when Google Pixel 1 was offline,
+causing users to suspect general mesh failure even though S24 Ultra and Tab S10 Ultra were healthy.
+Additionally, camera photos saved to `Temporary Screenshots\Camera` without a UI folder picker or
+quick folder button, and "Clips Delivered" reset to zero on process restart without clear labeling.
+*Fix:* Enriched outbox indicator to display target nodes directly (for example: `1 Queued (Pixel)`),
+added `Default Camera Backup Folder` entry with browse button and quick-access `📷 Camera Photos` button,
+renamed stat card to `Session Delivered`, and strictly gated `direct_password_sync` as a dependent child
+of `allow_sensitive` in the dashboard UI.
+
+**(2026-11-01) Continuity stamp relay attribution isolation, File Explorer shell refresh, and image log formatting.**
+*Symptom:* Local Windows laptop re-copies within 6s of an Android clipboard update were logged as
+`phone (via laptop) -> phone: 6 chars`. Newly saved screenshots took up to 1-2 seconds to visually
+appear in an open Windows File Explorer window due to Explorer's asynchronous background polling.
+Furthermore, image deliveries logged raw byte counts as `chars`.
+*Fix:* Gated stamp correlation in `core/hub.py` to peers within the exact same `SyncDomain`,
+preventing standalone nodes like `laptop` from adopting Android stamps. Added Windows Shell change
+notification (`SHChangeNotify` with `SHCNE_CREATE` and `SHCNE_DELETE`) in `nodes/windows_node.py` on
+disk writes and thumbnail pruning to force immediate File Explorer UI refreshes. Formatted image
+deliveries in hub logs as `bytes [image]`.
 
 ---
 

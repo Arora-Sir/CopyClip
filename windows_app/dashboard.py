@@ -339,7 +339,7 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
         stat_deliv_val = tk.StringVar(value="0")
         tk.Label(stat_col1, textvariable=stat_deliv_val, bg=SURFACE, fg=SUCCESS,
                  font=(FONT_FAMILY, 15, "bold")).pack(anchor="w")
-        tk.Label(stat_col1, text="Clips Delivered", bg=SURFACE, fg=TEXT_MUTED,
+        tk.Label(stat_col1, text="Session Delivered", bg=SURFACE, fg=TEXT_MUTED,
                  font=(FONT_FAMILY, 8)).pack(anchor="w")
 
         # Divider 1
@@ -351,8 +351,10 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
         stat_queue_label = tk.Label(stat_col2, textvariable=stat_queue_val, bg=SURFACE,
                                     fg=TEXT_MUTED, font=(FONT_FAMILY, 15, "bold"))
         stat_queue_label.pack(anchor="w")
-        tk.Label(stat_col2, text="Outbox Queued", bg=SURFACE, fg=TEXT_MUTED,
-                 font=(FONT_FAMILY, 8)).pack(anchor="w")
+        stat_queue_sublabel_val = tk.StringVar(value="Outbox Queued")
+        stat_queue_sublabel = tk.Label(stat_col2, textvariable=stat_queue_sublabel_val, bg=SURFACE,
+                                       fg=TEXT_MUTED, font=(FONT_FAMILY, 8))
+        stat_queue_sublabel.pack(anchor="w")
 
 
         # Divider 2
@@ -532,6 +534,16 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
             except Exception as e:
                 messagebox.showerror("Folder Error", f"Could not open folder:\n{target}\n\nError: {e}")
 
+        def open_camera_photos_dir():
+            cfg = _load_config_file()
+            base_dir = cfg.get("screenshot_backup_dir") or os.path.join(os.path.expanduser("~"), "Pictures", "Screenshots", "Temporary Screenshots")
+            target = cfg.get("camera_backup_dir") or os.path.join(base_dir, "Camera")
+            try:
+                os.makedirs(target, exist_ok=True)
+                os.startfile(target)
+            except Exception as e:
+                messagebox.showerror("Folder Error", f"Could not open folder:\n{target}\n\nError: {e}")
+
         ss_btn_row = tk.Frame(ss_quick_card, bg=SURFACE)
         ss_btn_row.pack(fill="x")
 
@@ -541,6 +553,13 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
                                highlightthickness=1, highlightbackground=SURFACE_BORDER)
         btn_all_ss.pack(side="left", padx=(0, 6))
         _add_hover_effect(btn_all_ss, SURFACE_CARD, SURFACE_HOVER)
+
+        btn_cam_photos = tk.Button(ss_btn_row, text="📷 Camera Photos", command=open_camera_photos_dir,
+                                   bg=SURFACE_CARD, fg="#38bdf8", activebackground=SURFACE_HOVER, activeforeground="#38bdf8",
+                                   font=(FONT_FAMILY, 8, "bold"), relief="flat", padx=10, pady=5, cursor="hand2",
+                                   highlightthickness=1, highlightbackground=SURFACE_BORDER)
+        btn_cam_photos.pack(side="left", padx=(0, 6))
+        _add_hover_effect(btn_cam_photos, SURFACE_CARD, SURFACE_HOVER)
 
         btn_phone_ss = tk.Button(ss_btn_row, text="📱 S24 Ultra", command=lambda: open_device_ss_dir("phone"),
                                  bg=SURFACE_CARD, fg=TEXT, activebackground=SURFACE_HOVER, activeforeground=TEXT,
@@ -833,11 +852,45 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
                                  activebackground=SURFACE, activeforeground=TEXT, font=(FONT_FAMILY, 8))
         chk_cam.pack(anchor="w", pady=(6, 0))
 
+        # Camera Backup Directory Picker
+        cam_dir_frame = tk.Frame(ss_card, bg=SURFACE)
+        cam_dir_frame.pack(fill="x", padx=(20, 0), pady=(4, 6))
+
+        tk.Label(cam_dir_frame, text="Default Camera Backup Folder:", bg=SURFACE, fg=TEXT_MUTED,
+                 font=(FONT_FAMILY, 8, "bold")).pack(anchor="w")
+
+        cam_dir_row = tk.Frame(cam_dir_frame, bg=SURFACE)
+        cam_dir_row.pack(fill="x", pady=(2, 0))
+
+        camera_dir_entry = tk.Entry(cam_dir_row, bg=SURFACE_CARD, fg=TEXT, insertbackground=TEXT,
+                                    font=(FONT_FAMILY, 8), relief="flat",
+                                    highlightthickness=1, highlightbackground=SURFACE_BORDER)
+        default_cam_dir = curr_cfg.get("camera_backup_dir", "")
+        camera_dir_entry.insert(0, default_cam_dir)
+        camera_dir_entry.pack(side="left", fill="x", expand=True, ipady=2)
+
+        def _browse_cam_dir():
+            cur = camera_dir_entry.get().strip() or os.path.join(base_ss_entry.get().strip(), "Camera")
+            picked = filedialog.askdirectory(title="Select Camera Backup Folder", initialdir=cur)
+            if picked:
+                camera_dir_entry.delete(0, "end")
+                camera_dir_entry.insert(0, picked)
+
+        cam_br_btn = tk.Button(cam_dir_row, text="Browse...", command=_browse_cam_dir,
+                               bg=SURFACE_CARD, fg=TEXT, activebackground=SURFACE_HOVER,
+                               font=(FONT_FAMILY, 8), relief="flat", padx=8, pady=2,
+                               highlightthickness=1, highlightbackground=SURFACE_BORDER, cursor="hand2")
+        cam_br_btn.pack(side="left", padx=(6, 0))
+        _add_hover_effect(cam_br_btn, SURFACE_CARD, SURFACE_HOVER)
+
+        tk.Label(cam_dir_frame, text="Leave empty to default to Temporary Screenshots\\Camera",
+                 bg=SURFACE, fg=TEXT_DIM, font=(FONT_FAMILY, 8)).pack(anchor="w")
+
         camera_subfolders_var = tk.BooleanVar(value=curr_cfg.get("camera_device_subfolders", False))
         chk_cam_sub = tk.Checkbutton(ss_card, text="Organize Camera Photos by Device Subfolders (Camera\\<device>\\)",
                                      variable=camera_subfolders_var, bg=SURFACE, fg=TEXT, selectcolor=SURFACE_CARD,
                                      activebackground=SURFACE, activeforeground=TEXT, font=(FONT_FAMILY, 8))
-        chk_cam_sub.pack(anchor="w", pady=(4, 0))
+        chk_cam_sub.pack(anchor="w", padx=(20, 0), pady=(2, 0))
 
         # 3. Clipboard Sync Policies Section
         tk.Label(config_scroll_content, text="CLIPBOARD MESH POLICIES & LIMITS", bg=BG, fg=TEXT_MUTED,
@@ -880,7 +933,49 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
                                    activebackground=SURFACE, activeforeground=TEXT, font=(FONT_FAMILY, 8))
         chk_adopt.pack(anchor="w", pady=(6, 0))
 
+        allow_recopy_var = tk.BooleanVar(value=curr_cfg.get("allow_recopy", True))
+        chk_recopy = tk.Checkbutton(policy_card, text="Intentional Re-Copy Refresh (Allow repeat copies to refresh mesh)",
+                                    variable=allow_recopy_var, bg=SURFACE, fg=TEXT, selectcolor=SURFACE_CARD,
+                                    activebackground=SURFACE, activeforeground=TEXT, font=(FONT_FAMILY, 8))
+        chk_recopy.pack(anchor="w", pady=(4, 0))
+        tk.Label(policy_card, text="Re-copying the same text after 0.3s refreshes it across all devices immediately, bypassing the 90s dedup window.",
+                 bg=SURFACE, fg=TEXT_DIM, font=(FONT_FAMILY, 8)).pack(anchor="w", padx=(20, 0), pady=(0, 2))
+
+        # Sensitive credentials subsection container
+        sens_subcard = tk.Frame(policy_card, bg=SURFACE_CARD, highlightbackground=SURFACE_BORDER,
+                                highlightthickness=1, padx=14, pady=12)
+        sens_subcard.pack(fill="x", pady=(14, 4))
+
+        tk.Label(
+            sens_subcard,
+            text="SENSITIVE CREDENTIALS & PASSWORD SYNC (EXTRA_IS_SENSITIVE)",
+            bg=SURFACE_CARD, fg="#f59e0b", font=(FONT_FAMILY, 9, "bold")
+        ).pack(anchor="w", pady=(0, 4))
+
+        tk.Label(
+            sens_subcard,
+            text="Controls how 2FA OTPs, Authenticator codes, and password manager clips are handled across the mesh.",
+            bg=SURFACE_CARD, fg=TEXT_MUTED, font=(FONT_FAMILY, 8)
+        ).pack(anchor="w", pady=(0, 8))
+
         allow_sensitive_var = tk.BooleanVar(value=curr_cfg.get("allow_sensitive", False))
+        direct_password_sync_var = tk.BooleanVar(value=curr_cfg.get("direct_password_sync", False))
+
+        def _update_sensitive_ui_state():
+            is_enabled = allow_sensitive_var.get()
+            if is_enabled:
+                chk_direct_pwd.config(state="normal", fg="#f59e0b", activeforeground="#f59e0b")
+                lbl_direct_pwd.config(fg=TEXT_DIM)
+                sensitive_wipe_entry.config(state="normal", bg=SURFACE, fg=TEXT)
+                lbl_wipe_title.config(fg=TEXT)
+                lbl_wipe_hint.config(fg=TEXT_DIM)
+            else:
+                direct_password_sync_var.set(False)
+                chk_direct_pwd.config(state="disabled", fg=TEXT_MUTED, activeforeground=TEXT_MUTED)
+                lbl_direct_pwd.config(fg=TEXT_MUTED)
+                sensitive_wipe_entry.config(state="disabled", bg=SURFACE_BORDER, fg=TEXT_MUTED)
+                lbl_wipe_title.config(fg=TEXT_MUTED)
+                lbl_wipe_hint.config(fg=TEXT_MUTED)
 
         def _on_sensitive_toggle():
             if allow_sensitive_var.get():
@@ -901,72 +996,80 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
                 confirmed = messagebox.askyesno("Enable Sensitive Clipboard Sync", warn_msg, icon="warning")
                 if not confirmed:
                     allow_sensitive_var.set(False)
+            _update_sensitive_ui_state()
 
         chk_sens_sync = tk.Checkbutton(
-            policy_card,
-            text="Sync Sensitive Clips (OTPs, Authenticator codes) [EXPERIMENTAL]",
+            sens_subcard,
+            text="Option 1: Sync Sensitive Clips (OTPs, Authenticator codes) [EXPERIMENTAL]",
             variable=allow_sensitive_var,
             command=_on_sensitive_toggle,
-            bg=SURFACE, fg="#f59e0b", selectcolor=SURFACE_CARD,
-            activebackground=SURFACE, activeforeground="#f59e0b",
+            bg=SURFACE_CARD, fg="#f59e0b", selectcolor=SURFACE,
+            activebackground=SURFACE_CARD, activeforeground="#f59e0b",
             font=(FONT_FAMILY, 9, "bold")
         )
-        chk_sens_sync.pack(anchor="w", pady=(8, 0))
+        chk_sens_sync.pack(anchor="w", pady=(2, 0))
 
         tk.Label(
-            policy_card,
-            text="Protected by auto-wipe timer, Win+V history exclusion, and Microsoft Cloud sync blocking.",
-            bg=SURFACE, fg=TEXT_DIM, font=(FONT_FAMILY, 8)
+            sens_subcard,
+            text="Master gate. Enables sync with 10s auto-wipe timer, Win+V history exclusion, and cloud sync blocking.",
+            bg=SURFACE_CARD, fg=TEXT_DIM, font=(FONT_FAMILY, 8)
         ).pack(anchor="w", padx=(24, 0), pady=(0, 4))
 
-        wipe_row = tk.Frame(policy_card, bg=SURFACE)
-        wipe_row.pack(anchor="w", padx=(24, 0), pady=(4, 6))
-        tk.Label(wipe_row, text="Auto-Wipe Timer (seconds):", bg=SURFACE, fg=TEXT, font=(FONT_FAMILY, 9)).pack(side="left")
-        sensitive_wipe_entry = tk.Entry(wipe_row, bg=SURFACE_CARD, fg=TEXT, insertbackground=TEXT,
+        wipe_row = tk.Frame(sens_subcard, bg=SURFACE_CARD)
+        wipe_row.pack(anchor="w", padx=(24, 0), pady=(2, 6))
+        lbl_wipe_title = tk.Label(wipe_row, text="Auto-Wipe Timer (seconds):", bg=SURFACE_CARD, fg=TEXT, font=(FONT_FAMILY, 9))
+        lbl_wipe_title.pack(side="left")
+        sensitive_wipe_entry = tk.Entry(wipe_row, bg=SURFACE, fg=TEXT, insertbackground=TEXT,
                                         font=(FONT_MONO, 9), width=5, relief="flat",
                                         highlightthickness=1, highlightbackground=SURFACE_BORDER)
         sensitive_wipe_entry.insert(0, str(int(round(curr_cfg.get("sensitive_wipe_s", 10.0)))))
         sensitive_wipe_entry.pack(side="left", padx=(8, 12))
-        tk.Label(wipe_row, text="(Default: 10s. Clears clipboard automatically on all devices)",
-                 bg=SURFACE, fg=TEXT_DIM, font=(FONT_FAMILY, 8)).pack(side="left")
+        lbl_wipe_hint = tk.Label(wipe_row, text="(Default: 10s. Clears clipboard automatically on all devices)",
+                                 bg=SURFACE_CARD, fg=TEXT_DIM, font=(FONT_FAMILY, 8))
+        lbl_wipe_hint.pack(side="left")
 
-        direct_password_sync_var = tk.BooleanVar(value=curr_cfg.get("direct_password_sync", False))
+        # Nested Option 2 Container
+        opt2_frame = tk.Frame(sens_subcard, bg=SURFACE_CARD)
+        opt2_frame.pack(fill="x", padx=(16, 0), pady=(6, 2))
 
         def _on_direct_password_toggle():
+            if not allow_sensitive_var.get():
+                direct_password_sync_var.set(False)
+                return
             if direct_password_sync_var.get():
                 warn_msg = (
-                    "Direct Password & Re-Copy Sync\n\n"
+                    "Direct Password Mode\n\n"
                     "Enabling this option will:\n"
-                    " 1. Show passwords and sensitive clips directly in Windows Clipboard History (Win+V)\n"
-                    " 2. Keep passwords in the clipboard without auto-wiping after 10 seconds\n"
-                    " 3. Allow re-copying the same text or password twice to bring it to the top of the clipboard\n\n"
+                    " 1. Show passwords and credentials directly in Windows Clipboard History (Win+V)\n"
+                    " 2. Keep passwords on the clipboard without auto-wiping after 10 seconds\n\n"
                     "Security Warning:\n"
                     "Passwords copied from Bitwarden or password managers will be stored in your Windows Clipboard History in plain text and will not be automatically deleted.\n\n"
-                    "Do you want to enable direct password copy and re-copy sync?"
+                    "Do you want to enable direct password sync?"
                 )
-                confirmed = messagebox.askyesno("Enable Direct Password & Re-Copy Sync", warn_msg, icon="warning")
-                if confirmed:
-                    if not allow_sensitive_var.get():
-                        allow_sensitive_var.set(True)
-                else:
+                confirmed = messagebox.askyesno("Enable Direct Password Mode", warn_msg, icon="warning")
+                if not confirmed:
                     direct_password_sync_var.set(False)
 
         chk_direct_pwd = tk.Checkbutton(
-            policy_card,
-            text="Direct Password & Re-Copy Sync (Show in Win+V History & Allow Repeat Copies)",
+            opt2_frame,
+            text="└─ Option 2: Direct Password Mode (Show in Win+V History & Disable Auto-Wipe)",
             variable=direct_password_sync_var,
             command=_on_direct_password_toggle,
-            bg=SURFACE, fg="#f59e0b", selectcolor=SURFACE_CARD,
-            activebackground=SURFACE, activeforeground="#f59e0b",
+            bg=SURFACE_CARD, fg="#f59e0b", selectcolor=SURFACE,
+            activebackground=SURFACE_CARD, activeforeground="#f59e0b",
             font=(FONT_FAMILY, 9, "bold")
         )
-        chk_direct_pwd.pack(anchor="w", pady=(8, 0))
+        chk_direct_pwd.pack(anchor="w")
 
-        tk.Label(
-            policy_card,
-            text="Displays Bitwarden credentials in Win+V clipboard history, disables auto-wipe, and moves re-copied items to top.",
-            bg=SURFACE, fg=TEXT_DIM, font=(FONT_FAMILY, 8)
-        ).pack(anchor="w", padx=(24, 0), pady=(0, 4))
+        lbl_direct_pwd = tk.Label(
+            opt2_frame,
+            text="Requires Option 1. Relaxes lockdown for password managers: disables auto-wipe and shows credentials in Win+V history.",
+            bg=SURFACE_CARD, fg=TEXT_DIM, font=(FONT_FAMILY, 8)
+        )
+        lbl_direct_pwd.pack(anchor="w", padx=(24, 0), pady=(0, 2))
+
+        # Initialize dynamic state on window load
+        _update_sensitive_ui_state()
 
         # 4. Network, Timers & Security Section
         tk.Label(config_scroll_content, text="NETWORK, TIMERS & CRYPTOGRAPHIC SECURITY", bg=BG, fg=TEXT_MUTED,
@@ -1068,6 +1171,7 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
             new_cfg = dict(curr_cfg)
             new_cfg["devices"] = devices_list
             new_cfg["allow_images"] = allow_images_var.get()
+            new_cfg["allow_recopy"] = allow_recopy_var.get()
             new_cfg["allow_sensitive"] = allow_sensitive_var.get()
             new_cfg["direct_password_sync"] = direct_password_sync_var.get()
             new_cfg["sensitive_wipe_s"] = sens_wipe
@@ -1080,6 +1184,7 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
             }
             new_cfg["screenshot_exclude_from_history"] = exc_history_var.get()
             new_cfg["camera_backup"] = camera_backup_var.get()
+            new_cfg["camera_backup_dir"] = camera_dir_entry.get().strip()
             new_cfg["camera_device_subfolders"] = camera_subfolders_var.get()
             new_cfg["max_chars"] = max_c
             new_cfg["adopt_on_connect"] = adopt_var.get()
@@ -1131,9 +1236,26 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
             # Update stats
             stats = status.get("stats", {})
             stat_deliv_val.set(str(stats.get("delivered", 0)))
-            active_queued = len(status.get("outbox", []))
+            outbox_keys = list(status.get("outbox", []))
+            active_queued = len(outbox_keys)
             stat_queue_val.set(str(active_queued))
             stat_queue_label.config(fg=WARNING if active_queued > 0 else TEXT_MUTED)
+            if active_queued > 0:
+                targets = []
+                for k in outbox_keys:
+                    _, _, ident = k.partition(":")
+                    target_name = ident.capitalize() if ident else k
+                    if target_name.lower() == "phone":
+                        target_name = "S24"
+                    elif target_name.lower() == "tab":
+                        target_name = "Tab S10"
+                    elif target_name.lower() == "pixel":
+                        target_name = "Pixel"
+                    targets.append(target_name)
+                targets_str = ", ".join(targets)
+                stat_queue_sublabel_val.set(f"Queued ({targets_str})")
+            else:
+                stat_queue_sublabel_val.set("Outbox Queued")
 
 
             # Count online nodes

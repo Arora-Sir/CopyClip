@@ -39,7 +39,8 @@ class Hub:
                  policy: Policy, outbox: Outbox, dedup: RecentClips | None = None,
                  baseline_store: BaselineStore | None = None,
                  tick_s: float = 2.0, adopt_on_connect: bool = False,
-                 direct_password_sync: bool = False) -> None:
+                 direct_password_sync: bool = False,
+                 allow_recopy: bool = True) -> None:
         self.nodes = {n.name: n for n in nodes}
         self.domains = domains
         self.policy = policy
@@ -49,6 +50,7 @@ class Hub:
         self.tick_s = tick_s
         self.adopt_on_connect = adopt_on_connect
         self.direct_password_sync = direct_password_sync
+        self.allow_recopy = allow_recopy
         # Plain bool, not lock-guarded: a UI toggle racing one in-flight clip by a few
         # milliseconds is harmless, and CPython's GIL already makes the read/write atomic.
         self.paused = False
@@ -100,6 +102,9 @@ class Hub:
 
         if "direct_password_sync" in cfg:
             self.direct_password_sync = bool(cfg.get("direct_password_sync", False))
+
+        if "allow_recopy" in cfg:
+            self.allow_recopy = bool(cfg.get("allow_recopy", True))
 
         camera_backup = bool(cfg.get("camera_backup", True))
         camera_backup_dir = cfg.get("camera_backup_dir") or None
@@ -194,7 +199,7 @@ class Hub:
                 d.note_observed(desc.sha256, desc.node)
 
             if known:
-                if self.dedup.is_recopy(desc.sha256, desc.node):
+                if self.allow_recopy and self.dedup.is_recopy(desc.sha256, desc.node):
                     log.info("[%s] re-copied %s; re-fetching body to update clipboard",
                              desc.node, desc.short)
                     self.dedup.prepare_for_redelivery(desc.sha256, desc.node)
@@ -241,7 +246,7 @@ class Hub:
             sha = payload.sha256
             source = payload.origin
 
-            if self.dedup.is_recopy(sha, source):
+            if self.allow_recopy and self.dedup.is_recopy(sha, source):
                 log.info("[%s] local re-copy of %s; refreshing mesh", source, payload.short)
                 self.dedup.prepare_for_redelivery(sha, source)
 
@@ -299,7 +304,9 @@ class Hub:
                 return
 
             now = time.time()
-            if (self._last_stamp_node and self._last_stamp_node != source
+            stamp_domain = self.domain_of(self._last_stamp_node) if self._last_stamp_node else None
+            if (self._last_stamp_node and domain is not None and stamp_domain is domain
+                    and self._last_stamp_node != source
                     and (now - self._last_stamp_time <= 6.0)):
                 origin_display = f"{self._last_stamp_node} (via {source})"
                 self._last_stamp_node = None
@@ -395,7 +402,8 @@ class Hub:
             if self.baseline_store:
                 self.baseline_store.set(node.name, sha)
             self.stats["delivered"] += 1
-            log.info("%s -> %s: %d chars%s", display, node.name, payload.char_len,
+            size_str = f"{payload.char_len} bytes [image]" if payload.is_image else f"{payload.char_len} chars"
+            log.info("%s -> %s: %s%s", display, node.name, size_str,
                      " (queued on device until unlock)"
                      if result == WriteResult.DEFERRED else "")
             return True

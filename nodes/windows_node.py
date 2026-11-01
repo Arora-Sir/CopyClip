@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+import ctypes
 from datetime import datetime
 
 import winclip
@@ -30,6 +31,16 @@ _IMAGE_EXTENSIONS = {
     "image/bmp": ".bmp",
     "image/webp": ".webp",
 }
+
+
+def _notify_shell(path: str, is_delete: bool = False) -> None:
+    """Notify Windows Shell/File Explorer to refresh folder view immediately."""
+    try:
+        # SHCNE_CREATE = 0x00000002, SHCNE_DELETE = 0x00000004, SHCNF_PATHW = 0x0005
+        event = 0x00000004 if is_delete else 0x00000002
+        ctypes.windll.shell32.SHChangeNotify(event, 0x0005, str(path), None)
+    except Exception:
+        pass
 
 
 class WindowsNode(ClipboardNode):
@@ -206,6 +217,7 @@ class WindowsNode(ClipboardNode):
                 n += 1
             with open(path, "wb") as fh:
                 fh.write(payload.data)
+            _notify_shell(path, is_delete=False)
             log.info("[%s] screenshot backed up to %s", self.name, path)
 
             # Defense-in-depth: if an earlier saved screenshot within the last 8 seconds was a
@@ -220,6 +232,7 @@ class WindowsNode(ClipboardNode):
                     try:
                         if os.path.exists(last_path):
                             os.remove(last_path)
+                            _notify_shell(last_path, is_delete=True)
                             log.info("[%s] pruned thumbnail preview duplicate: %s", self.name, last_path)
                     except Exception as exc:
                         log.debug("[%s] thumbnail prune skipped: %s", self.name, exc)
@@ -253,6 +266,7 @@ class WindowsNode(ClipboardNode):
                 idx += 1
             with open(path, "wb") as f:
                 f.write(payload.data)
+            _notify_shell(path, is_delete=False)
             log.info("[%s] camera photo backed up to %s (%d bytes)", self.name, path, len(payload.data))
         except Exception:
             log.warning("[%s] camera photo backup failed", self.name, exc_info=True)

@@ -457,10 +457,19 @@ def test_hub_stamp_attribution():
         hub.on_stamp("tab", "100")
         check("stamp records recent node", hub._last_stamp_node == "tab")
 
+        # When phone (same domain as tab) observes a clip, it correlates tab (via phone)
         p = ClipPayload.from_text("hello from tab via phone", origin="phone")
         hub.on_clip(p)
         check("laptop received clip from phone", len(laptop.writes) == 1)
         check("stamp cleared after correlation", hub._last_stamp_node is None)
+
+        # Standalone node (laptop) must NOT correlate an Android stamp
+        hub.on_stamp("phone", "200")
+        check("stamp records recent phone stamp", hub._last_stamp_node == "phone")
+        p2 = ClipPayload.from_text("hello from laptop alone", origin="laptop")
+        hub.on_clip(p2)
+        check("phone received clip from laptop", len(phone.writes) == 1)
+        check("stamp was not falsely correlated by standalone laptop", hub._last_stamp_node == "phone")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -789,6 +798,20 @@ def test_hub_recopy_routing_with_direct_password_sync():
         hub_off.on_descriptor(desc)
         check("intentional re-copy on fresh hub triggers refresh", phone_off.refreshes == 2)
         check("laptop receives re-delivery on fresh hub", len(laptop_off.writes) == 2)
+
+        # Re-copy suppressed when allow_recopy is False.
+        hub_off.allow_recopy = False
+        time.sleep(0.35)
+        hub_off.on_descriptor(desc)
+        check("re-copy ignored when allow_recopy is False", phone_off.refreshes == 2)
+        check("no extra delivery when allow_recopy is False", len(laptop_off.writes) == 2)
+
+        # Re-copy re-enabled via allow_recopy=True.
+        hub_off.allow_recopy = True
+        time.sleep(0.35)
+        hub_off.on_descriptor(desc)
+        check("re-copy succeeds when allow_recopy is re-enabled", phone_off.refreshes == 3)
+        check("laptop receives re-delivery when allow_recopy is True", len(laptop_off.writes) == 3)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
