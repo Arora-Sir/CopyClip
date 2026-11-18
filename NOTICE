@@ -2,3 +2,7 @@ CopyClip
 Copyright 2026 Mohit Arora
 
 This product includes software developed by Mohit Arora.
+
+Portions of android/ClipBridge.java, android/spike/ImageSpike.java and android/android/content/IContentProvider.java are derived from scrcpy (https://github.com/Genymobile/scrcpy): the FakeContext and Workarounds classes, and the IContentProvider stub. scrcpy is Copyright (C) 2018 Genymobile and Copyright (C) 2018-2026 Romain Vimont, licensed under the Apache License 2.0. The derived code was adapted and narrowed for CopyClip, and the changes are described in the comments of those files.
+
+The optional Android app uses the Shizuku API libraries by RikkaApps (https://github.com/RikkaApps/Shizuku-API), licensed under the MIT License, as a build dependency. Design references that contributed ideas but no code are credited in README.md and otherCopyProjects/NOTES.md.
