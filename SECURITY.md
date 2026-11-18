@@ -2,7 +2,7 @@
 
 ## Reporting a problem
 
-If you find a way to read, inject or alter someone's clipboard through CopyClip, please report it privately to the maintainer instead of opening a public issue. Include the steps to reproduce and the Windows and Android versions involved.
+If you find a way to read, inject or alter someone's clipboard through CopyClip, please report it privately to the maintainer at contact@mohitarora.me instead of opening a public issue. Include the steps to reproduce and the Windows and Android versions involved.
 
 ## Trust model in one paragraph
 

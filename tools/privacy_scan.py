@@ -34,7 +34,7 @@ MAX_BYTES = 2_000_000
 PLACEHOLDER_IPS = ("100.64.0.", "192.0.2.", "198.51.100.", "203.0.113.", "10.0.0.", "127.", "0.0.0.0")
 PLACEHOLDER_USERS = {"you", "user", "username", "<user>", "yourname", "public", "default", "name",
                      "%username%", "<you>", "x", "me"}
-SAFE_EMAIL_DOMAINS = ("example.com", "example.org", "users.noreply.github.com", "noreply.github.com")
+SAFE_EMAIL_DOMAINS = ("example.com", "example.org", "users.noreply.github.com", "noreply.github.com", "contact@mohitarora.me")
 
 IP_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
 WIN_USER_RE = re.compile(r"[A-Za-z]:[\\/]+(?:\\\\)?Users[\\/]+(?:\\\\)?([^\\/\s\"'<>|:*?]+)", re.I)

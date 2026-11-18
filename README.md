@@ -200,3 +200,7 @@ Designed for, deliberately not built yet: file transfer via Taildrop, searchable
 ## License
 
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## Contact
+
+Questions and private security reports: contact@mohitarora.me. See [SECURITY.md](SECURITY.md).
