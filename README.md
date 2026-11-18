@@ -199,4 +199,4 @@ Designed for, deliberately not built yet: file transfer via Taildrop, searchable
 
 ## License
 
-No license has been chosen yet, which means all rights are reserved by default. Choose one before publishing: see [docs/PUBLISHING.md](docs/PUBLISHING.md).
+Licensed under the Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

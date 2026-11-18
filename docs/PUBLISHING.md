@@ -6,7 +6,7 @@ Status as of 2026-11-12: the GitHub repository is **private**. Nothing here has 
 
 | Decision | Why it matters |
 | :--- | :--- |
-| **License** | Without one, all rights are reserved and others may not legally use or change the code. MIT or Apache-2.0 are common for a tool like this. Add a `LICENSE` file and update the README's License section |
+| **License** | Done: Apache-2.0. `LICENSE` and `NOTICE` are at the repo root and the README License section is updated |
 | **Author name in identifiers** | The Android package is `com.mohitarora.copyclip` and the on-device helper class is `me.mohit.copyclip.ClipBridge`. They credit the author, and renaming them breaks already-installed apps and the dex deployment, so they were left alone. Rename only if you want the name out of the code |
 | **Session logs** | `docs/sessions/` are working logs of the project. They were scrubbed of IPs and paths, but you may prefer not to publish them |
 | **`CLAUDE.md` and `.claude/`** | `CLAUDE.md` is git-ignored because it points at a private skills library. `.claude/skills/copyclip-feature` is still tracked; remove it from tracking if you do not want it public |
