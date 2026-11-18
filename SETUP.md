@@ -32,6 +32,37 @@ For "set up CopyClip on the laptop plus devices A, B, C":
 
 Everything below is the detail behind each step.
 
+## Folder structure
+
+```
+CopyClip/
+  copyclip.py              start here: python copyclip.py --status checks every device
+  config.json              your settings (copy config.example.json, never committed)
+  copyclip.key             the shared key, created on first run (never committed)
+  windows_app/tray.py      the tray app; start_silent.vbs and install_autostart.ps1 start it at sign-in
+  windows_app/ui/          the window (html, css, js)
+  android/                 ClipBridge.java and build_dex.ps1, the helper that runs on each device
+  bin/clipbridge.dex       the built helper (pushed to each device automatically)
+  logs/, state/            runtime files, git-ignored (copyclip.log, crash.log, outbox, baseline)
+  tests/, tools/           tests and helpers (python tools/run_tests.py)
+  docs/                    bug write-ups, session notes, screenshots
+```
+
+## Step by step (about 20 minutes for the first device)
+
+1. **Install the prerequisites.** Windows 11, Python 3.11 or newer, Android platform-tools (`adb`), the Android SDK for the one-time dex build, and Tailscale on the PC and every device. No `pip install` is needed.
+2. **Get the code and copy the settings file.** `copy config.example.json config.json`.
+3. **Find each device's Tailscale address** (§0) and put it in `config.json` under `devices[]` (§1.3).
+4. **Build the on-device helper once.** `pwsh androiduild_dex.ps1` (§2.1).
+5. **Pair Wireless Debugging once per device** (§2.2). This is the only step that needs a cable or the pairing code.
+6. **Start the tray app.** `python windows_app	ray.py`, or double-click `Start CopyClip.bat` (§1.4). The CopyClip window opens when you click the tray icon.
+7. **Check it.** `python copyclip.py --status`, then copy a line of text on one device and paste it on another (§1.5).
+8. **Turn on start at sign-in** from Settings, or run `install_autostart.ps1` (§1.4).
+9. **Optional.** Group devices that already mirror each other (Samsung Continuity) under `domains[]`, and set the screenshot folder in Settings.
+10. **Run the tests** with `python toolsun_tests.py` to confirm your copy is healthy. Nothing in that run touches your clipboard or devices.
+
+When something misbehaves, open the **Logs** screen in the window first. After a crash, `logs/crash.log` holds the stack of every thread.
+
 ---
 
 ## What you're setting up
@@ -92,7 +123,7 @@ hex-decoded on either end. See [Security notes](#security-notes) before copying 
 
 ### 1.3 config.json
 
-Copy/edit `config.json` at the repo root. Each device gets an entry in `devices[]`, name of
+Copy `config.example.json` to `config.json` at the repo root (it is git-ignored, so your addresses never get committed), then edit it. Devices can also be added later from the window's Devices screen. Each device gets an entry in `devices[]`, name of
 your choosing (§0 above). For the common, no-app case (§2):
 
 ```json
@@ -148,7 +179,7 @@ powershell -File windows_app\create_shortcut.ps1
 ```
 
 **Optional extra layer, only if this machine already runs the AHK automation framework at
-`<software>\Programming\AutoHotKey\AllScripts\`** (this machine's own personal
+`<local tools folder>`** (this machine's own personal
 infrastructure, not part of the CopyClip repo, and not present on a fresh machine, the Run
 key above is already sufficient there): this framework's `RestartNamedPythonServer()` helper
 adds crash-recovery and a boot-time force-relaunch (so an edited `.py` picks up on the
@@ -162,7 +193,7 @@ PATH_COPYCLIP := "<repo>"
 ```
 
 ```autohotkey
-, {name: "CopyClip_Python.exe", path: """<ahk-dir>\CopyClip_Python.exe"" ""<repo>\windows_app\tray.py"""}
+, {name: "CopyClip_Python.exe", path: """<local tools folder>"" ""<repo>\windows_app\tray.py"""}
 ```
 
 (append that as one more element inside the existing `WATCHDOG_APPS := [ ... ]` array,
@@ -419,5 +450,5 @@ With the updated Dashboard & auto-provisioning system, adding a future device is
 ## Troubleshooting
 
 See [README.md](README.md#troubleshooting) for wire-level issues (locked device, Continuity
-degraded, etc.). For anything §3/Shizuku-specific, see `bugs/SPIKE-ANDROID-USERSERVICE.md`
-and `bugs/SPIKE-PIXEL-ACCESSIBILITY.md`.
+degraded, etc.). For anything §3/Shizuku-specific, see `docs/bugs/SPIKE-ANDROID-USERSERVICE.md`
+and `docs/bugs/SPIKE-PIXEL-ACCESSIBILITY.md`.

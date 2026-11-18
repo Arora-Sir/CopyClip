@@ -1,6 +1,6 @@
 # SPIKE: Shizuku UserService/AIDL as a replacement for `adb shell app_process`
 
-Not a bug. A throwaway pre-implementation spike, following the `bugs/` conventions (measured
+Not a bug. A throwaway pre-implementation spike, following the `docs/bugs/` conventions (measured
 evidence, never recollection; say when something is inferred rather than proven). Source:
 `android_app/` (a full Gradle/Android Studio project, kept as the real starting point for the
 production app, not deleted like `android/spike/`'s throwaway probes -- see Verdict). Ran
@@ -9,7 +9,7 @@ ADB pairing) on **2026-08-31**.
 
 ## Why this exists
 
-The plan at `<local-plan>` (a full
+The plan at `C:\Users\you\.claude\plans\when-reboot-is-done-validated-crane.md` (a full
 Windows-tray-app + Android-APK rewrite of CopyClip) depends on replacing today's
 `adb shell app_process ... ClipBridge serve` launch mechanism, and the abandoned Termux/`rish`
 text-shell tier, with Shizuku's official `UserService`/AIDL API. Live web research (Shizuku's
@@ -34,7 +34,7 @@ gap had to be measured before any production networking/sync code was built on t
 
 ## Measured transcript (real device, real Shizuku permission grant, real probe call)
 
-Screenshots taken at each step (not just logcat) to avoid the exact mistake `bugs/README.md`
+Screenshots taken at each step (not just logcat) to avoid the exact mistake `docs/bugs/README.md`
 warns about (misreading state without looking at the real output):
 
 ```

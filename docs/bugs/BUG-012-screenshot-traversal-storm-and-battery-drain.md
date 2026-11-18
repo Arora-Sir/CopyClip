@@ -111,9 +111,9 @@ Queried remote DEX size via `stat -c %s /data/local/tmp/clipbridge.dex` prior to
    ```
    Idle CPU dropped to strictly **0.0%**.
 3. **Autonomous Multi-Device Mesh Test Suite**:
-   Executed [`tests/test_autonomous_mesh.py`](../tests/test_autonomous_mesh.py): 13/13 PASSED.
+   Executed [`tests/test_autonomous_mesh.py`](../../tests/test_autonomous_mesh.py): 13/13 PASSED.
 4. **Cartesian Speed Benchmark**:
-   Executed [`tests/benchmark_mesh_speed.py`](../tests/benchmark_mesh_speed.py): All 12 directed device routes within SLA limits. Screenshot capture sync latency from S24 Ultra measured at **842 ms average** (P50: 835 ms).
+   Executed [`tests/benchmark_mesh_speed.py`](../../tests/benchmark_mesh_speed.py): All 12 directed device routes within SLA limits. Screenshot capture sync latency from S24 Ultra measured at **842 ms average** (P50: 835 ms).
 
 ---
 

@@ -1,9 +1,38 @@
+# --- personal / machine-specific -----------------------------------------
+# config.json holds your own device addresses, folders and tuning. Start from
+# config.example.json. Nothing in here may ever be pushed.
+config.json
+config.local.json
+# Personal terms for tools/privacy_scan.py (your name, email, serials).
+.privacy-terms
+# AI-assistant configuration that points at a private skills library on this machine.
+CLAUDE.md
+.claude/settings.local.json
+# Anything you want to keep beside the project but never publish.
+docs/private/
+private/
+*.local.md
+# Runtime files that can hold clipboard content, device ids or tokens.
+*.pid
+control.json
+crash/
+*.dmp
+ui-profile/
+
 # --- secrets -------------------------------------------------------------
 # The shared HMAC key for the Tier 2 (Termux) transport. Committing this would let
 # anything on the tailnet inject into or read your clipboard. Keep it local.
 copyclip.key
 *.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
 !*.pub
+.env
+.env.*
+!.env.example
 
 # --- build output --------------------------------------------------------
 # clipbridge.dex is generated from android/ClipBridge.java by android/build_dex.ps1.
@@ -66,3 +95,5 @@ desktop.ini
 
 # --- project tracking ----------------------------------------------------
 PROJECT_TRACKER.md
+
+HANDOFF.md

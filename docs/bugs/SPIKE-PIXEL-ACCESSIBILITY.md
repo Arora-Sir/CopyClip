@@ -1,6 +1,6 @@
 # SPIKE: does an enabled AccessibilityService unlock background clipboard reads on Android 10?
 
-Not a bug. A throwaway pre-implementation spike, following the `bugs/` conventions (measured
+Not a bug. A throwaway pre-implementation spike, following the `docs/bugs/` conventions (measured
 evidence, never recollection; say when something is inferred rather than proven). Ran against
 **pixel** (`FA6A40311146`, sailfish, Android 10 / SDK 29) on **2026-08-31**.
 
@@ -97,7 +97,7 @@ pixel's real options remain what they were before this session's app-rewrite wor
 re-arm, staying on Sefirah (now better understood: one-directional for the same reason measured
 here, not a mystery), or further investigation into a different mechanism on this specific OS
 version -- not yet identified. The accessibility grant made on the real device during this spike
-was disabled afterward (`bugs/README.md` convention: clean up spike side effects that serve no
+was disabled afterward (`docs/bugs/README.md` convention: clean up spike side effects that serve no
 further purpose once a spike concludes negative).
 
 ## Follow-up spike (2026-09-01): does the plain clipboard-change listener even fire in the background, separate question from whether its *content read* succeeds

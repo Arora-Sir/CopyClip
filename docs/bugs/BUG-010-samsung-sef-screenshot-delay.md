@@ -8,7 +8,7 @@
 
 ## 1. Symptom
 
-Taking a screenshot on Samsung Galaxy S24 Ultra took 60 to 90+ seconds to sync to the Windows laptop and appear in `<home>\Pictures\Screenshots\Temporary Screenshots\`. Previously, screenshots synced near-instantly (< 1-2 seconds) after capture.
+Taking a screenshot on Samsung Galaxy S24 Ultra took 60 to 90+ seconds to sync to the Windows laptop and appear in `C:\Users\you\Pictures\Screenshots\Temporary Screenshots\`. Previously, screenshots synced near-instantly (< 1-2 seconds) after capture.
 
 ---
 

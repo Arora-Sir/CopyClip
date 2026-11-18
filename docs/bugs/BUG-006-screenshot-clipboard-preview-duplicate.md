@@ -53,7 +53,7 @@ Ruled out, in order, each with direct evidence:
 - **The tablet, or a second CopyClip instance.** Every delivery in every pair is logged
   through the same `phone` node in the same running process; nothing is ever logged as
   `tab -> laptop`. (`adb devices -l` did show extra sessions —
-  `192.0.2.50:5555`/`192.0.2.51:5555` on the LAN in addition to the configured
+  `100.64.0.21:5555`/`100.64.0.22:5555` on the LAN in addition to the configured
   Tailscale addresses — but `adb shell getprop ro.serialno` on each confirmed they are the
   *same two physical devices* on a second network path, not a third device. Stale, harmless,
   not implicated; not touched by this fix.)
@@ -97,7 +97,7 @@ continuously in the background at all, and plausibly why it never triggers Samsu
 `android/ClipBridge.java`'s own code comment ("Samsung's screenshot capture does not call
 setPrimaryClip() — measured directly... three real screenshots... produced zero clipboard
 events") was written as part of commit `7ecd706` (2026-08-12). The doc that comment cites,
-`bugs/SCREENSHOT-SYNC-FIX.md`, does not exist in this repository (see Open points), so that
+`docs/bugs/SCREENSHOT-SYNC-FIX.md`, does not exist in this repository (see Open points), so that
 original measurement's conditions can't be re-checked directly — but the installation
 timeline makes Sefirah the clear new variable since that measurement was made.
 
@@ -208,7 +208,7 @@ precedent on the Python side) — to disable without a revert, set it to `0`.
   in practice, `IMAGE_DESC_HOLD_MS` is the one knob to shorten, or the primary (Sefirah
   accessibility) fix should be applied instead so this defense-in-depth layer can come out
   entirely.
-- **`bugs/SCREENSHOT-SYNC-FIX.md`, cited by a code comment in `ClipBridge.java` as the
+- **`docs/bugs/SCREENSHOT-SYNC-FIX.md`, cited by a code comment in `ClipBridge.java` as the
   source of the original "screenshots don't call setPrimaryClip" measurement, does not exist
   in this repository.** Left as-is (out of scope for this bug), but worth fixing or removing
   the dangling reference next time that comment is touched.
@@ -228,8 +228,8 @@ precedent on the Python side) — to disable without a revert, set it to `0`.
   adjacent mechanism (or at the dedup TTL being too short for however long two processes
   overlap), not a regression of the fix above. Not investigated further here since it has
   not yet been observed; the user was told to report back if it recurs.
-- **Stray adb sessions on the LAN** (`192.0.2.50:5555` for the phone,
-  `192.0.2.51:5555` for the tablet, alongside the configured Tailscale addresses) were
+- **Stray adb sessions on the LAN** (`100.64.0.21:5555` for the phone,
+  `100.64.0.22:5555` for the tablet, alongside the configured Tailscale addresses) were
   noticed and confirmed harmless (same two physical devices via `ro.serialno`, not extra
   devices) but not otherwise investigated - likely leftovers from earlier manual testing on
   the same Wi-Fi network.

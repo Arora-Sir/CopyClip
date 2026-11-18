@@ -6,7 +6,7 @@ description: Add a new feature to CopyClip (Windows-to-Samsung clipboard sync). 
 # Adding a feature to CopyClip
 
 This is the pipeline actually used to build image clipboard sync (see
-`bugs/SPIKE-IMAGE-CLIPBOARD.md` and the corresponding plan file for that session). It
+`docs/bugs/SPIKE-IMAGE-CLIPBOARD.md` and the corresponding plan file for that session). It
 exists so a simple prompt like "add file sharing" or "add clipboard history" automatically
 gets the same rigor, without the user having to restate it every time.
 
@@ -47,7 +47,7 @@ never root, measure don't assume) apply to every step below and are not repeated
   from a non-app process), build a throwaway probe under `android/spike/`, compile it with
   its own `build_*_dex.ps1` (copy the pattern from `android/spike/build_spike_dex.ps1`),
   push it to a real device, and run it.
-- Write the measured results to `bugs/SPIKE-<FEATURE>.md`, following `bugs/README.md`'s
+- Write the measured results to `docs/bugs/SPIKE-<FEATURE>.md`, following `docs/bugs/README.md`'s
   conventions: real command output, not recollection; say explicitly what was NOT verified
   (don't imply full coverage); note any bugs found in ported code along the way (image
   sync found two in its scrcpy `FakeContext` port that scrcpy itself never needed to fix).
@@ -113,5 +113,5 @@ in `ARCHITECTURE.md` §6):
   get flipped on only after the manual verification checklist passes — this is a deliberate
   choice, not an oversight to fix later.
 - If a spike found open questions that live verification couldn't close, record them as
-  open in `bugs/README.md`'s tracker, using the same "OPEN, awaiting confirmation"
+  open in `docs/bugs/README.md`'s tracker, using the same "OPEN, awaiting confirmation"
   convention as BUG-001 through BUG-003 — don't quietly drop them or claim full coverage.

@@ -1,358 +1,202 @@
 # CopyClip
 
-One clipboard across **predator-helios-300** (Windows 11), **s24-ultra** (Galaxy S24 Ultra),
-**tab-s10-ultra** (Galaxy Tab S10 Ultra), and **pixel** (a 2016 Google Pixel), over
-Tailscale. Pixel is the one with a real quirk (it needs a manual re-arm after a reboot, see
-[Configuration](#configuration)'s `_pixel` note), the other two just work.
+![CopyClip: one clipboard across your Windows PC, Galaxy phone and tablet](docs/images/banner.png)
 
-Setup and quick reference below. For the full architecture, wire protocol, every tuning
-knob and why it's set the way it is, and postmortems of real bugs found in production, see
-[ARCHITECTURE.md](ARCHITECTURE.md).
+**One clipboard across your Windows PC, your phone, your tablet and any other Android device. No cloud, no account, no app on the phone, no pip dependencies.**
 
-Copy anywhere, paste anywhere. No cloud, no account, no pip dependencies, and **no app
-required on any of the three phones/tablets**, `ClipBridge.dex` runs under the shell UID
-over a plain `adb` pipe, entirely managed from the laptop, no shared key needed for that.
-`pixel`'s only real quirk: its Android version predates the OS feature that gives phone/tab
-reboot-proof adb, so it needs a manual `adb -d tcpip 5555` re-arm after a cold boot, same
-sync either way once that's done. It also has a real installed app (`android_app/`) on top,
-purely for the manual "Send Clip" push as a fallback for the moments it hasn't been
-re-armed yet, that's the one place a shared key and a hub address actually apply. See
-[SETUP.md](SETUP.md) for the full installation runbook, on this or a new device.
+Copy on any device, paste on any other. Text, images and screenshots, with a modern Windows window for status, history and settings.
 
 ```
-copy on laptop  ->  phone, tablet, and pixel all have it
-copy on phone   ->  laptop and pixel have it   (tablet already did, via Samsung)
-copy on tablet  ->  laptop and pixel have it   (phone already did, via Samsung)
-copy on pixel   ->  laptop, phone, and tablet all have it
+copy on the PC     ->  every device has it
+copy on a phone    ->  the PC and every other device have it
+copy a screenshot  ->  pasteable everywhere, and saved to a folder on the PC
 ```
 
-`pixel` is standalone, no Samsung partner of its own, so every copy reaches it directly and
-its own copies reach everyone else directly too. It just needs re-arming after a reboot
-(above), everything else about it works exactly like the laptop.
+> Status: used daily since August 2026 on one Windows 11 PC with a Galaxy phone, a Galaxy tablet and an old Pixel. The documented history of what broke and how it was fixed is in [docs/bugs](docs/bugs/README.md).
 
-## Measured performance
+## The Windows app
 
-Real empirical numbers measured live across all four devices over Tailscale wireless mesh (120 benchmark runs across 12 directed pairs). Full empirical details: [SESSION-2026-09-04.md](SESSION-2026-09-04.md).
+![CopyClip overview: status band, devices and recent activity side by side](docs/images/overview.png)
 
-| Content & Path | Average (Median) | Best | Transport & Route |
-| :--- | ---: | ---: | :--- |
-| Android listener to Laptop write (Text) | 0.2 ms (0.1 ms) | 0.1 ms | Persistent open ADB socket to Win32 clip |
-| Laptop to S24 Ultra (Text) | 391 ms (364 ms) | 317 ms | Direct ADB socket over Tailscale |
-| Laptop to Tab S10 Ultra (Text via Samsung) | 348 ms (319 ms) | 283 ms | Domain representative + Samsung Continuity |
-| Laptop / Phone to Pixel 1 (Text via Hub) | 745 ms (701 ms) | 547 ms | Multi-hop ADB socket relay |
-| S24 Ultra Full Screenshot to Laptop | 842 ms (835 ms) | 728 ms | SEFT recognition + directory mtime caching (<0.1ms) + base64 chunked stream |
-| Tab S10 Ultra Full Screenshot to Laptop | 1,128 ms (1,082 ms) | 985 ms | Inode mtime check + in-memory header scan + chunked stream |
-| Pixel 1 Full Screenshot to Laptop | 1,018 ms (995 ms) | 892 ms | IEND validation + chunked stream |
-| Inter-device Screenshot Relay (Tab to Phone) | 1,468 ms (1,422 ms) | 1,326 ms | Device capture -> Laptop Hub -> Continuity |
-| Idle Android CPU Footprint | **0.0% CPU** | 0.0% | Inode mtime guard replaces 2,912 stat calls/sec |
+A small tray service keeps clipboards in sync. Click the tray icon to open the CopyClip window (Windows 11 style, follows your light or dark setting, keyboard accessible, readable at any display scale).
 
-Largest verified clip: **93,247 characters**, byte exact, including emoji, Devanagari, tabs
-and CRLF. Default cap is 800,000 characters.
+| Screen | What it does |
+| :--- | :--- |
+| **Overview** | One-glance health ("All devices connected"), delivered / waiting / skipped counts, every device with a sync switch, recent clips, quick actions, and a clear banner with a Retry button when a device is unreachable |
+| **Devices** | List and detail for each device, health checks (ADB reachable, authorised), add, edit and remove with a built-in connection test, sync groups for devices that already mirror each other |
+| **Activity** | Every clip that moved: where it came from, where it went, how long it took, and the reason when it was skipped. Text previews stay in memory on the PC; sensitive clips never get a preview. Every text or picture row has a copy button at its right end, and pictures show as thumbnails with a **Copy full image** button in the detail panel |
+| **Logs** | Live log with level, device and text filters, repeated errors folded into one line with a count, copy, export and archive |
+| **Settings** | Everything configurable, with inline validation, an unsaved-changes bar, and a "Needs restart" tag on the few settings that cannot apply live |
+| **Tray menu / flyout** | Pause for 15 minutes, 1 hour or until resumed, per-device pause, send the current clipboard, recent pictures you can copy again, open the screenshots folder, quit. Optionally a compact flyout instead of the window |
 
----
-
-## Two things worth knowing
-
-### 1. A locked phone cannot receive clips immediately
-
-**Android denies all clipboard access while a device is locked.** Not screen-off, the
-*lock*. Measured: with the keyguard up, `getPrimaryClip` returns null and `setPrimaryClip`
-is accepted and then silently discarded, raising nothing at all.
-
-CopyClip handles this rather than losing data:
-
-- If **one** device is unlocked, the write goes there and Samsung carries it to the other.
-- If **both** are locked, the clip waits in a durable outbox and lands the moment you unlock.
-- Copying **from** a device is never affected: if you are copying on it, it is unlocked.
-
-### 2. It only writes to one device on purpose
-
-Samsung Continuity already syncs your phone and tablet. Measured on these devices: a write
-to the phone reappeared on the tablet **2,499 ms later**, tagged
-`mcf_continuity;device_name=S24_Ultra`. Samsung does not care that the write came from
-`app_process`.
-
-So CopyClip writes to exactly **one** Samsung device and lets Samsung distribute. It never
-syncs phone to tablet itself, and it never re-sends a clip into the domain it came from.
-
-It does not blindly trust that, though. Samsung requires the same Wi-Fi network and Samsung
-account, and documents that its Wi-Fi Direct channels can degrade after VPN use, which
-matters because Tailscale runs here permanently. So after each write CopyClip watches
-whether the other device echoes the same content hash within 8 seconds. Three misses in a
-row and it starts writing to both devices directly until propagation recovers.
-
-### 3. What actually keeps a third party from reading or injecting your clips
-
-Tailscale WireGuard and ADB key authorization protect clipboard traffic in transit. Devices are addressed strictly by fixed Tailscale IP. High-speed direct streaming sockets require mutual HMAC-SHA256 authentication against the shared key before processing any bytes. A device that is not an authorized member of your private tailnet cannot route packets to the sync endpoints. Full detail on the security architecture:
-[ARCHITECTURE.md §9](ARCHITECTURE.md#9-security: trust-model).
-
----
-
-## Setup
-
-**Full step-by-step runbook, laptop through every Android tier: [SETUP.md](SETUP.md).**
-Quick version if everything is already configured once:
-
-**1. Build the on-device bridge** (once, and after any edit to `ClipBridge.java`, the
-Shizuku-hosted tier reuses this exact same dex, see [SETUP.md](SETUP.md) §2):
+To see every screen without any device attached:
 
 ```bash
+python tools/demo_ui.py --open        # add --degraded to see an offline device
+```
+
+| Activity with picture history | Tray flyout |
+| :--- | :--- |
+| ![Activity: recent pictures as thumbnails, click one to copy the full image](docs/images/activity.png) | ![Tray flyout: devices, recent pictures, quick actions](docs/images/flyout.png) |
+
+| Devices | Logs | Settings |
+| :--- | :--- | :--- |
+| ![Devices](docs/images/devices.png) | ![Logs](docs/images/logs.png) | ![Settings](docs/images/settings.png) |
+
+These screenshots come from `tools/demo_ui.py` with made-up devices and pictures. Nothing in them is real data.
+
+The window is a separate process: a chromeless app window of a Chromium browser you already have, in its own private profile, so it has its own taskbar entry and the CopyClip icon and never mixes with your browsing. CopyClip uses your default browser if it is Chromium based (Brave, Chrome, Edge, Vivaldi, Opera), then tries Edge, Brave and Chrome, and only then a normal browser tab. It is a single window by design: clicking the tray icon restores and focuses it, however fast you click, and never opens a second one. If it ever crashes or is closed, clipboard sync in the tray is untouched. See [BUG-018](docs/bugs/BUG-018-dashboard-tcl-crash-takes-down-sync.md) for why that matters.
+
+## What is different about it
+
+- **Nothing to install on the phone.** The on-device helper (`ClipBridge`) runs as Android's shell user over a plain `adb` connection, the same mechanism `scrcpy` uses. No root, ever. An optional small Android app exists only for manual "Send Clip" from a device that cannot be reached.
+- **Built around how Samsung actually behaves.** Samsung Continuity already mirrors a phone and a tablet, so CopyClip writes to one of them and lets Samsung distribute, then checks that the echo arrived and falls back to writing both if it did not. The clip's identity is its content hash, because Samsung rewrites clip labels.
+- **A locked phone cannot receive clips.** Android denies clipboard access under the lock screen. CopyClip queues the clip in a durable outbox and delivers it the moment you unlock, instead of losing it.
+- **Careful with sensitive clips.** One-time codes and password-manager copies are dropped by default. If you opt in, they stay out of Windows clipboard history and cloud sync, are never written to disk, and clear themselves after a timer.
+- **Zero third-party dependencies**, on purpose, so the sync path stays small and cannot be taken down by a package. Pure Python standard library on the PC; the on-device helper is one readable Java file built with the Android SDK.
+- **Measured, not assumed.** Every behaviour above comes from a device experiment written up in [docs/bugs](docs/bugs/README.md) before the code was built on it.
+
+### Measured performance
+
+120 benchmark runs across 12 device pairs over a Tailscale mesh. Details: [docs/sessions/SESSION-2026-09-04.md](docs/sessions/SESSION-2026-09-04.md).
+
+| Content and path | Average (median) | Best |
+| :--- | ---: | ---: |
+| Android to PC write (text) | 0.2 ms (0.1 ms) | 0.1 ms |
+| PC to phone (text) | 391 ms (364 ms) | 317 ms |
+| PC to tablet (text, via Samsung) | 348 ms (319 ms) | 283 ms |
+| Phone screenshot to PC | 842 ms (835 ms) | 728 ms |
+| Tablet screenshot to PC | 1,128 ms (1,082 ms) | 985 ms |
+| Idle Android CPU | 0.0% | 0.0% |
+
+Largest verified text clip: 93,247 characters, byte exact, including emoji, Devanagari, tabs and CRLF. The default cap is 800,000 characters.
+
+## Requirements
+
+- Windows 11 and Python 3.11 or newer (nothing to `pip install`).
+- [Tailscale](https://tailscale.com) on the PC and the devices, so they can reach each other.
+- Android devices with Wireless debugging turned on, and `adb` (Android platform-tools) on the PC.
+- A Chromium based browser for the window (Edge ships with Windows 11; Brave and Chrome work too). Without one, a normal browser tab is used.
+- The Android SDK to build the on-device helper once: `powershell -File android\build_dex.ps1`.
+
+## Quick start
+
+```bash
+# 1. Your own settings. config.json is git-ignored; it never gets committed.
+copy config.example.json config.json
+#    edit config.json: your device names and Tailscale addresses (or use the Devices screen later)
+
+# 2. Build the on-device helper (once, and after editing android/ClipBridge.java)
 powershell -File android\build_dex.ps1
-```
 
-**2. Check everything is reachable:**
-
-```bash
+# 3. Check connectivity
 python copyclip.py --status
-```
 
-**3. Run the laptop side** (tray icon, dashboard, autostarts at login on its own):
-
-```bash
+# 4. Run it: tray icon plus window, and it starts at sign-in on its own
 python windows_app\tray.py
 ```
 
-Nothing to `pip install` on the laptop. Start Menu shortcut: `powershell -File
-windows_app\create_shortcut.ps1`.
-
----
-
-## How it works
-
-None of the three phones/tablets need an installed app for actual sync. `ClipBridge.dex`
-executes under the **shell UID** via `app_process`, which is the only non-root identity
-Android grants background clipboard access to (`appops` confirms `com.android.shell
-READ_CLIPBOARD: allow`). Same mechanism scrcpy uses. This is true for `pixel` too, it just
-also needs a manual `adb -d tcpip 5555` re-arm after a cold boot, since its Android version
-predates persistent Wireless Debugging pairing. An installed app (`android_app/`, package
-`com.mohitarora.copyclip`) exists on top of that, `pixel`-specific: purely a manual "Send
-Clip" push for the moments it hasn't been re-armed yet. Its own attempt at a Shizuku-hosted
-automatic bridge is a dead end on this specific device (Shizuku there only ever grants root,
-which this project refuses to use for anything), so don't rely on it, plain adb above is
-pixel's real sync path. See [SETUP.md](SETUP.md) for both paths,
-[ARCHITECTURE.md](ARCHITECTURE.md) for the full mechanism.
-
-```
-        +--------------- Samsung sync domain ----------------+
-        |  s24-ultra  <---- Continuity (~2.5 s) ---->  tab   |
-        +------^---------------------------------------^-----+
-               | representative                        | standby
-               |  (reads + writes)                     |  (reads only)
-        +------+---------------------------------------+-----+
-        |                    CopyClip hub                     |
-        |        dedup . policy . outbox . routing            |
-        +----------------------^------------------------------+
-                               |
-                        Windows clipboard
-```
-
-Design points that are load bearing:
-
-- **Devices announce, they do not push.** A change produces a small `DESC` frame carrying a
-  content hash, not the payload. The laptop asks for the body only when it does not already
-  recognise the hash. Without this, Samsung's mirroring would put every clip on the wire
-  twice.
-- **One persistent pipe per device**, not a process per copy. Spawning `adb shell` each time
-  costs 200 to 400 ms and would defeat the whole point.
-- **`adb shell -T`** disables PTY allocation. Without it adb rewrites `\n` as `\r\n` and
-  silently corrupts every multi-line clip.
-- **Base64 on the wire**, so newlines, tabs, emoji and Devanagari survive intact.
-- **Version-adaptive reflection.** `IClipboard` signatures have changed repeatedly
-  (attribution tag in Android 11, device id in Android 14), so overloads are resolved at
-  runtime. scrcpy issue #4285 is the cautionary tale.
-- **Poll `ClipDescription.getTimestamp()`, not `addPrimaryClipChangedListener`.** The
-  listener needs a hidden AIDL stub and breaks outright on Android 14.
-- **Identity is the content hash, never the clip label**, because Samsung rewrites labels
-  when it relays.
-
-### Layout
-
-```
-copyclip.py             CLI entry point and wiring only
-core/models.py          ClipPayload / ClipDescriptor: bytes + MIME, so images fit later
-core/hub.py             routing; depends only on abstractions
-core/dedup.py           per-(hash, node) TTL map; prevents three-way echo storms
-core/outbox.py          durable single-slot queue, atomic writes
-core/policy.py          size cap, denylist, sensitive-clip filter
-nodes/base.py           ClipboardNode ABC: the only interface the hub knows
-nodes/windows_node.py   wraps winclip.py + winimage.py
-nodes/android_node.py   ClipBridge protocol + its own reconnect supervisor
-domains/sync_domain.py  representative election + Continuity health
-transports/             adb (Tier 1) and TCP-to-Termux (Tier 2)
-winclip.py              Windows clipboard via raw ctypes, no pywin32
-winimage.py             image codec: hand-rolled PNG encode, WIC decode, DIB<->PNG
-android/ClipBridge.java on-device helper source, readable and rebuildable
-```
-
-Nothing here is an opaque blob: `bin/clipbridge.dex` is built from `ClipBridge.java` by a
-script in this folder.
-
----
+Full runbook, including phone setup and the optional tiers: [SETUP.md](SETUP.md). A start-menu shortcut: `powershell -File windows_app\create_shortcut.ps1`.
 
 ## Configuration
 
-`config.json`. Order within a domain's `members` sets representative preference.
+Most settings change live from the window. Everything is validated before it is saved, and `config.json` is written atomically, so a bad value can never leave a half-written file. A problem is reported in plain words, all at once.
 
-| Key | Meaning |
-| :--- | :--- |
-| `devices[]` | `name`, `transport` (`adb` or `tcp`), `device` (Tailscale IP and port), `enabled` |
-| `domains[]` | Devices that mirror each other by themselves. `grace_s` is how long Continuity gets before a probe counts as missed. Accumulating `fail_threshold` consecutive misses triggers direct writes |
-| `max_chars` | Oversized clips are **skipped and logged**, never truncated |
-| `adopt_on_connect` | `false` stops a reconnect from overwriting what you just copied on the laptop with a device's older clip |
-| `dedup_ttl_s` | How long a clip is remembered. Longer than Samsung's ~2.5 s relay, short enough that deliberately re-copying works |
-| `denylist_regex` | Clips matching any pattern are never synced |
-| `ack_timeout_s` | How long a write waits for the device's real `ACK`/`DEFER` reply before being treated as failed. A successful local pipe write is not proof the device received it. An explicit ACK confirms actual delivery. See [ARCHITECTURE.md §6.3](ARCHITECTURE.md#63-ack-confirmed-writes) |
-| `allow_images` | Whether image clips sync at all. Defaults `true`: real-use confirmation is complete, see [ARCHITECTURE.md §6.6a](ARCHITECTURE.md#66a-image-clipboard-mediastore-under-app_process-and-why-it-needed-fakecontext) |
-| `max_image_bytes` | Oversized images are **skipped and logged**, never truncated: enforced on both the laptop and each device independently |
-| `screenshot_backup_dir` | Local folder every image clip (laptop-native or synced from a device) also gets saved into as a plain file, Windows'-own-naming-style (`Screenshot yyyy-MM-dd HHMMSS.png`). Empty string (default) disables it. A stopgap for a Windows 11 25H2 Snipping Tool bug: see [ARCHITECTURE.md §8](ARCHITECTURE.md#8-lessons-learned-this-session) |
-| `screenshot_backup_include_devices` | Whether `screenshot_backup_dir` also covers images arriving *from* the phone/tablet, not just ones captured on the laptop itself. Default `true` |
-| `screenshot_exclude_from_history` | Whether a device-synced image is excluded from Windows Clipboard History (Win+V) so it can't evict your other history entries. Default `true`. Ctrl+V still pastes it correctly either way. This only affects whether it is listed in Win+V. `false` brings back Win+V visibility for synced screenshots, at the cost of the eviction problem this exists to solve: see [bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md) |
-| `camera_backup` | Whether photos captured in `/sdcard/DCIM/Camera` auto-sync to laptop. Default `false` |
-| `camera_device_subfolders` | Whether synced camera photos are stored in subdirectories named after each source device. Default `false` |
-| `allow_sensitive` | Whether clips flagged as sensitive by source apps (Android `EXTRA_IS_SENSITIVE`, e.g. Google Authenticator OTPs, Bitwarden/1Password passwords) are permitted to sync across the mesh. Default `false` (opt-in security gate) |
-| `sensitive_wipe_s` | Auto-wipe countdown in seconds (default `10.0`, configurable in dashboard or config). When a sensitive clip is synced, this timer automatically clears the clipboard across mesh nodes without leaving blank cards in Windows Clipboard History |
+| Key | Meaning | Applies |
+| :--- | :--- | :--- |
+| `devices[]` | `name`, optional `label`, `transport` (`adb` or `tcp`), `device` (address and port), `enabled` | restart |
+| `domains[]` | Devices that mirror each other by themselves (Samsung Continuity) | restart |
+| `hub_ip` | This PC's Tailscale address as the devices see it. Empty detects it automatically | restart |
+| `push_port` | Port devices dial in to for "Send Clip" (1024 to 65535) | restart |
+| `allow_images`, `max_image_bytes` | Whether images sync, and the largest one. Oversized images are skipped and logged, never cut short | live |
+| `max_chars`, `denylist_regex`, `allow_non_text` | Text size cap (skipped whole, never truncated), patterns that must never sync | live |
+| `allow_recopy` | Copying the same text again resends it everywhere | live |
+| `filter_screenshot_previews` | Samsung adds a small preview image next to each screenshot. `true` holds images under 60 KB for 2.5 seconds and drops the preview if the full picture follows, so it never shows up as a clip of its own | live |
+| `adopt_on_connect` | `false` keeps a reconnect from overwriting what you just copied with a device's older clip | live |
+| `allow_sensitive`, `sensitive_wipe_s`, `direct_password_sync` | Sensitive clips: opt-in, the auto-clear timer, and the explicit "keep in history" mode | live |
+| `screenshot_backup_dir`, `screenshot_backup_include_devices`, `screenshot_device_subfolders`, `device_screenshot_paths`, `screenshot_exclude_from_history` | Where screenshots are saved, per-device folders, and keeping synced images out of Win+V history | live |
+| `camera_backup`, `camera_backup_dir`, `camera_device_subfolders` | Back up camera photos from your devices | live |
+| `ack_timeout_s` | How long a write waits for the device's confirmation | live |
+| `autostart`, `activity_previews`, `tray_left_click` | Start at sign-in, clip previews in Activity, what a tray click opens | live |
+| `log_level` | `DEBUG`, `INFO`, `WARNING` or `ERROR` | restart |
 
-Devices are addressed by **raw Tailscale IP, never MagicDNS**, which sidesteps NRPT
-resolution breaking.
+Devices are addressed by raw Tailscale IP, never by name, which avoids DNS resolution problems on a tailnet.
 
-### Sensitive Clips & Credential Protection
+## Privacy and security
 
-Apps like Google Authenticator, 1Password, Bitwarden, and Samsung Pass tag copied OTP codes
-and passwords with Android's `ClipDescription.EXTRA_IS_SENSITIVE`.
+- **Everything stays on your devices and your tailnet.** There is no server and no account.
+- **The window talks to the tray over loopback only.** The control API binds to `127.0.0.1`, needs a random per-run token, rejects foreign `Host` and `Origin` headers, and serves a fixed list of files. These rules are tested in [tests/unit/test_control_api.py](tests/unit/test_control_api.py).
+- **The shared key never leaves your machines.** `copyclip.key` and any `*.key` are git-ignored. Authentication between the PC and a device is a mutual HMAC-SHA256 challenge before any clipboard data is processed.
+- **Nothing personal is published.** `config.json`, logs, runtime state and local AI-assistant config are git-ignored. `python tools/privacy_scan.py` checks the repository for private IPs, personal paths, email addresses and secrets, and a unit test fails if it finds any. Details: [SECURITY.md](SECURITY.md).
 
-- **Default Behavior (`"allow_sensitive": false`)**: Sensitive clips are dropped at the edge and
-  never transmitted across the network.
-- **Opt-in Sync (`"allow_sensitive": true`)**: Enables synchronization with multi-layer hardening:
-  - **Outbox Zero-Disk Guard**: Sensitive clips reside strictly in volatile RAM. They are never written to `outbox.json` on disk.
-  - **Windows Endpoint Hardening**: Synced with `CF_CAN_INCLUDE_IN_HISTORY = 0` (omitted from `Win+V`) and `CF_CAN_UPLOAD_TO_CLOUD = 0` (blocked from Microsoft Cloud Clipboard).
-  - **Clean Background Auto-Wipe**: After `sensitive_wipe_s` (default 10s), the clipboard is cleared via bare `EmptyClipboard()`, preventing empty white placeholder cards in `Win+V`.
-  - **Instant Supersession**: If any new clip is copied (non-sensitive text, another sensitive OTP, an image, or a local user copy) before the timer expires, the pending wipe is cancelled immediately.
+Sensitive clips in more detail: Android apps tag one-time codes and passwords with `EXTRA_IS_SENSITIVE`. By default those clips are dropped at the device. With `allow_sensitive` on, they sync with `CF_CAN_INCLUDE_IN_HISTORY = 0` and `CF_CAN_UPLOAD_TO_CLOUD = 0` on Windows, stay in memory only (never in `outbox.json`), and clear after `sensitive_wipe_s` seconds. Copying anything else first cancels the pending clear.
 
-For anything else, static regex patterns block transmission:
-
-```json
-"denylist_regex": ["BEGIN (RSA|OPENSSH) PRIVATE KEY", "^ghp_[A-Za-z0-9]{36}$"]
-```
-
----
-
-## Tests
+## Testing and reliability
 
 ```bash
-python tests\test_core.py             # pure logic, dedup, outbox, continuity (under a second)
-python tests\test_sensitive_sync.py   # sensitive sync, RAM outbox, clean wipe, supersession
-python tests\test_android_node.py     # AndroidNode protocol, chunked transfers, ACK/DEFER
-python tests\test_imaging.py          # PNG/DIBV5 image codecs, alpha preservation, 1080p speed
-python tests\test_e2e.py              # laptop + phone, real daemon
-python tests\test_three_device.py     # all three, real daemon (devices must be unlocked)
+python tools/run_tests.py                                  # 290+ unit tests, about 15 seconds, no devices, no clipboard
+COPYCLIP_SYSTEM_TESTS=1 python tools/run_tests.py --system # real Windows clipboard, with the tray app closed
+COPYCLIP_DEVICE_TESTS=1 python tools/run_tests.py --device tests/test_e2e.py   # real devices
 ```
 
-
-`test_three_device.py` asserts the guarantees that matter: exactly one device written per
-laptop copy, exactly one application per device copy, no writes back into the originating
-domain, and that mirrored clips never re-transfer their body.
-
----
+- Three tiers keep fast tests safe: unit tests never touch the clipboard or a device; the system tier refuses to run while CopyClip is running (it would sync test clips to your phones); the device tier needs an explicit opt-in. See [tests/README.md](tests/README.md).
+- Tests cover the wire protocol byte for byte, the HMAC framing (replay, tampering, malformed frames), the push listener and TCP transport over loopback, device reconnect supervision, the outbox and dedup, configuration validation, the control API's security rules, and the layering of the code itself.
+- Twenty-one documented bugs and device spikes, each with the evidence that found it, are in [docs/bugs](docs/bugs/README.md). A bug stays open until it is confirmed fixed in real use, not just when a test passes.
+- Session logs from the work are in [docs/sessions](docs/sessions).
 
 ## Troubleshooting
 
-### "adb connect failed" after rebooting a device
+**A device shows Offline.** The Overview banner shows the last error and a Retry button. After a phone reboot, wireless debugging may need re-arming once with the device on USB: `adb -d tcpip 5555`. Each device reconnects on its own, so one offline device never stops the others.
 
-Mostly does NOT happen in practice, once a device has paired Android's Wireless Debugging
-(or Shizuku) with a remembered network at least once: confirmed 2026-08-31 by a real phone
-reboot: `service.adb.tcp.port` was back at 5555 within 5 minutes, zero cable touched. The
-phone's adb keystore (`adb shell dumpsys adb`) shows a Shizuku-authorized key plus a
-remembered Wi-Fi AP list, which is almost certainly why: that pairing survives reboot on the
-OS side and reopens the wireless listener on its own, independent of `service.adb.tcp.port`
-itself being a wiped-on-boot runtime property (that part of the explanation below is still
-accurate, it is just not the whole story, and it is not something CopyClip or this repo
-controls either way).
+**Nothing arrives and the log shows a lock.** Android blocks clipboard access while locked. The clip waits in the outbox and applies on unlock. This is not a bug.
 
-A device that has genuinely never been through that pairing: freshly added, before its
-first setup, like a new Pixel: does need a manual re-arm. Do it once, with the device on
-USB:
+**A synced screenshot is missing from Win+V but pastes fine.** That is the default of `screenshot_exclude_from_history`: a large image was found to evict your other history entries. Turn it off in Settings to list synced images, and accept the eviction risk. See [BUG-005](docs/bugs/BUG-005-duplicate-screenshot-push.md).
 
-```bash
-adb -d tcpip 5555
+**Health check from a terminal:** `python copyclip.py --status`. If CopyClip is running it asks the running service instead of starting a second one.
+
+**The window does not open.** The tray tries each browser in turn and logs what happened to `logs\copyclip.log` (look for `copyclip.launcher`). Run `python windows_app\tray.py --legacy-ui` to use the old Tk window, and see the log in `logs\copyclip.log`.
+
+## Project layout
+
+```
+CopyClip/
+  copyclip.py              command-line entry point and wiring
+  winclip.py, winimage.py  Windows clipboard and image formats (raw ctypes, no dependencies)
+  config.example.json      copy to config.json and edit; config.json is never committed
+  windows_app/
+    tray.py                tray icon, menus, starts everything
+    service.py             what the window can ask the tray to do
+    control_api.py         local JSON API on 127.0.0.1 with a per-run token
+    launcher.py            opens the window (one window only) and the flyout
+    ui/                    index.html, app.css, app.js: the window itself
+  core/                    routing hub, config, dedup, outbox, policy, activity log, image header reader
+  nodes/                   one adapter per device kind: Windows clipboard, Android ClipBridge
+  transports/              adb, TCP, push listener, HMAC framing
+  domains/                 Samsung Continuity awareness
+  android/                 ClipBridge source (Java) and build script
+  android_app/             optional Android app for the manual Send Clip fallback
+  tools/                   run_tests.py, privacy_scan.py, demo_ui.py, banner/, device audit
+  tests/                   unit/ (no devices), system tier, device tier
+  docs/                    bugs/, sessions/, images/, PUBLISHING.md
 ```
 
-`adb tcpip 5555` only ever sets the *runtime* property `service.adb.tcp.port`, wiped on
-reboot on its own (`persist.adb.tcp.port` stays empty, and making that persistent needs
-root, off limits here): so without a Wireless Debugging/Shizuku pairing already in place,
-each real reboot does need this redone. The daemon reconnects on its own either way once the
-port is live. Each device reconnects independently, so one device rebooting never stops the
-other from working.
+Further reading: [ARCHITECTURE.md](ARCHITECTURE.md) (why the code is shaped this way), [SETUP.md](SETUP.md), [CONTRIBUTING.md](CONTRIBUTING.md), [docs/PUBLISHING.md](docs/PUBLISHING.md).
 
-### Nothing syncs, log shows `LOCK 1`
+## Acknowledgements
 
-The device is locked. Documented above, not a bug. Writes queue and apply on unlock.
+CopyClip stands on the work of others, and several of its decisions were made by reading their source:
 
-### Log says "Continuity has not propagated"
+- **[scrcpy](https://github.com/Genymobile/scrcpy)** by Genymobile: the technique of reaching Android's clipboard as the shell user through `app_process`, which is the foundation of ClipBridge.
+- **[Shizuku](https://github.com/RikkaApps/Shizuku)** and **Shizuku-API** by RikkaApps: the model for privileged helpers without root, and the reference for the optional Android app.
+- **[ClipCascade](https://github.com/Sathvik-Rao/ClipCascade)**, **[KDE Connect](https://github.com/KDE/kdeconnect-android)**, **[clipper](https://github.com/majido/clipper)**, **[AdbClipboard](https://github.com/PRosenb/AdbClipboard)** and **[ClipboardHelper](https://github.com/Potato-DiGua/ClipboardHelper)**: prior art whose designs and limits shaped what CopyClip does differently. What each contributed is recorded in [otherCopyProjects/NOTES.md](otherCopyProjects/NOTES.md).
+- **[Tailscale](https://tailscale.com)** for the private network that makes direct device addressing safe.
 
-Samsung's phone-to-tablet sync is not working: check both devices are on the same Wi-Fi,
-signed into the same Samsung account, with Bluetooth on. CopyClip has already failed over to
-writing both devices directly, so sync keeps working meanwhile.
+Thanks to everyone who maintains those projects.
 
-### A synced phone/tablet screenshot doesn't show up in Win+V, but pastes fine
+## Roadmap
 
-Expected, by design, not a bug: `screenshot_exclude_from_history` (default `true`)
-deliberately excludes device-synced images from Windows Clipboard History. Ctrl+V still
-pastes the correct image: this only affects whether it's *listed* in Win+V. It exists
-because a large synced image was found to evict the user's *other* Win+V entries, and
-there's no known way to keep both (visible in Win+V and not evicting anything): see
-[bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md). Set the config key to `false` to
-bring back Win+V visibility for synced screenshots and accept the eviction risk instead.
+Designed for, deliberately not built yet: file transfer via Taildrop, searchable clipboard history, and more devices per group. See [ARCHITECTURE.md](ARCHITECTURE.md#12-future-scope-designed-for-not-built).
 
-If you want the file itself, not just the clipboard/history: `screenshot_backup_dir` (see
-[Configuration](#configuration) and [Images](#images) above) saves every synced screenshot
-as a plain file regardless of this setting.
+## License
 
-### General health check
-
-```bash
-python copyclip.py --status
-```
-
-Shows each device, the elected representative, Continuity health, and anything pending in
-the outbox. Add `--log-level DEBUG` to the daemon to see every routing decision, or just
-double-click `Start CopyClip (Debug).bat` for the same thing without typing the flag.
-
----
-
-## Images
-
-Copy an image on any device, paste it on any other, same mechanism as text. `allow_images`
-in `config.json` is `true` by default: the two open questions from the pre-implementation
-device spike (see [bugs/SPIKE-IMAGE-CLIPBOARD.md](bugs/SPIKE-IMAGE-CLIPBOARD.md) and
-[ARCHITECTURE.md §6.6a](ARCHITECTURE.md#66a-image-clipboard-mediastore-under-app_process-and-why-it-needed-fakecontext))
-were confirmed in real use. PNG/JPEG/GIF/BMP/WEBP travel byte-for-byte. Only HEIC/HEIF/AVIF
-transcode to PNG. Images are stored on-device under `Pictures/CopyClip` via MediaStore, and
-capped at `max_image_bytes` (default 24 MiB), skipped and logged rather than truncated if
-oversized.
-
-Samsung's long screenshot (scroll capture) is supported: the initial single-page shot syncs
-immediately, and the full stitched image syncs again once Samsung finishes writing it, up to
-45 seconds later. Expect two synced images and two backup-folder files per long-screenshot
-session, not one (see
-[bugs/BUG-014](bugs/BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md)).
-
-The laptop side has a counterpart: `screenshot_backup_dir` saves every image clip (local or
-synced from a device) as a plain file too, same idea as the Android `Pictures/CopyClip`
-store but Windows'-own-filename-style: a stopgap for a Windows 11 25H2 Snipping Tool bug,
-off by default (empty string).
-
-A device-synced image is also, by default, excluded from Windows Clipboard History
-(Win+V): `screenshot_exclude_from_history`. Ctrl+V still pastes it normally. The image simply
-will not appear in the Win+V list. This exists because a large synced image
-was observed evicting the user's *other* Win+V entries, and there is no way to keep both
-(visible in Win+V *and* not evicting anything): see
-[bugs/BUG-005](bugs/BUG-005-duplicate-screenshot-push.md) for the full investigation.
-
-## Future scope
-
-Designed for, deliberately not built. Full detail:
-[ARCHITECTURE.md §12](ARCHITECTURE.md#12-future-scope-designed-for-not-built).
-
-- **Files** via Taildrop handoff.
-- **Clipboard history** with search.
-- **More devices**, by adding to a domain or creating another one. The hub does not change.
+No license has been chosen yet, which means all rights are reserved by default. Choose one before publishing: see [docs/PUBLISHING.md](docs/PUBLISHING.md).

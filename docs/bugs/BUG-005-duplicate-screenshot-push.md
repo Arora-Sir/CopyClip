@@ -128,7 +128,7 @@ specifically, and it does not use a different filename. Samsung's scroll capture
 the SAME filename with the final stitched image, seconds after the initial single-page shot.
 The different-filename theory above may still hold for the "edit" save case, which was not
 separately measured, but it is not what scroll capture does. See
-`bugs/BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md` for the actual fix,
+`docs/bugs/BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md` for the actual fix,
 which is a bounded re-arm window on the SAME filename, not a different-filename dedup.
 
 **Second fix, layered on top, not a replacement:** a small content-hash dedup in
@@ -221,7 +221,7 @@ never routes a clip back to its origin node), so this can never affect the user'
 captures, only ones synced in from a device.
 
 **This remains partially a spike**, per this project's own "measure before concluding, spike
-unproven platform behavior" rule (`bugs/SPIKE-IMAGE-CLIPBOARD.md` precedent) — the two things
+unproven platform behavior" rule (`docs/bugs/SPIKE-IMAGE-CLIPBOARD.md` precedent) — the two things
 certain from documentation are that the excluded item won't appear in Win+V's list and that
 Ctrl+V still pastes it correctly; whether exclusion also stops it from evicting *other*
 entries needed live confirmation, not just code review.

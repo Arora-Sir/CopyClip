@@ -1,6 +1,6 @@
 # SPIKE: image clipboard on the shell UID (Phase 0 of image sync)
 
-Not a bug. A throwaway pre-implementation spike, following the `bugs/` conventions
+Not a bug. A throwaway pre-implementation spike, following the `docs/bugs/` conventions
 (measured evidence, never recollection; say when something is inferred rather than proven).
 Source: `android/spike/ImageSpike.java` + `android/spike/android/content/IContentProvider.java`
 + `android/spike/build_spike_dex.ps1`. Not referenced by production code and safe to delete

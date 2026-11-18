@@ -36,7 +36,7 @@ reachable, and lets Samsung carry it to the other for free.
 behave exactly like the laptop if turned on. Off because it's used only 1-2 days a month and
 has no non-root way to keep wireless adb alive across its own reboots (Android's persistent
 Wireless Debugging pairing doesn't exist before Android 11; this device's final OS version is
-Android 10): see `config.json`'s `_pixel` note and [BUG-009](bugs/BUG-009-pixel-clipbridge-printstream-crash.md).
+Android 10): see `config.json`'s `_pixel` note and [BUG-009](docs/bugs/BUG-009-pixel-clipbridge-printstream-crash.md).
 
 ---
 
@@ -79,7 +79,7 @@ Its Android version predates persistent Wireless Debugging pairing (Android 11+)
 phone/tab it cannot get reboot survival from this alone, a real platform wall, not a config
 choice, so it needs `adb -d tcpip 5555` re-armed over USB after every cold start (this
 machine has a double-click convenience script for that at
-`<software>\Phone\Pixel\rearm_wireless_adb.bat`, personal tooling, not part of this repo).
+`<local tools folder>`, personal tooling, not part of this repo).
 Until re-armed, this device's entry just sits unreachable and the daemon retries with its
 normal backoff, harmless, same as any other device being briefly offline. **While
 unreachable, this also explains what actually keeps working and what doesn't**, confirmed
@@ -90,7 +90,7 @@ while Tier 1 is down (CopyClip's own attempt at that second hop queues in the ou
 instead, `outbox[node:pixel] holding ... target unavailable`, and flushes automatically the
 moment Tier 1 reconnects). The reverse direction has no such fallback: pixel-to-anyone has
 no automatic path at all while unreachable, Sefirah's own pixel-to-laptop direction has
-never worked (see `bugs/SPIKE-PIXEL-ACCESSIBILITY.md`), so Send Clip (§6.8) is the only way
+never worked (see `docs/bugs/SPIKE-PIXEL-ACCESSIBILITY.md`), so Send Clip (§6.8) is the only way
 out during that window, a manual tap, not automatic. Once re-armed, both hops become
 CopyClip's own direct, ACK-confirmed path and Sefirah's role in this specific chain becomes
 redundant again, not required, see §8's "pixel moved to Tier 1" entry for the full story.
@@ -199,8 +199,8 @@ being falsely marked "delivered" and later either lost or delivered stale.
 | [transports/tcp_transport.py](transports/tcp_transport.py) | Tier 2: TCP to the installed app's Shizuku-hosted bridge (or Termux, same protocol either way), for when reboot survival matters. The hub is always the client here, it dials out, never listens. |
 | [transports/push_listener.py](transports/push_listener.py) | Inbound server listening on push_port: accepts manual "Send Clip" pushes (PUSH verb) and high-speed direct Tailscale binary TCP image streams (STREAM verb) with mutual HMAC-SHA256 authentication. |
 | [android/ClipBridge.java](android/ClipBridge.java) | The on-device helper. Source is tracked; the compiled `.dex` is gitignored and rebuilt with `android/build_dex.ps1`. Unchanged by the installed-app work above, it's still the exact same dex, just launched differently. |
-| [android_app/](android_app/) | The installed Android app (package `com.mohitarora.copyclip`). `SyncForegroundService.kt` owns the Shizuku binding and republishes state to the UI; `shizuku/ClipBridgeService.kt` is the UserService that spawns `ClipBridge.dex` and enforces the shell-UID guard; `SendClipActivity.kt`/`shizuku/PushClient.kt` are the manual-fallback push path (§6.8). |
-| [windows_app/tray.py](windows_app/tray.py) | The laptop side's tray icon + autostart registration, wrapping `copyclip.py`'s own `build_hub()`/`load_config()` unchanged, the daemon itself did not change. `windows_app/dashboard.py` is the optional tkinter status window. |
+| [android_app/](android_app) | The installed Android app (package `com.mohitarora.copyclip`). `SyncForegroundService.kt` owns the Shizuku binding and republishes state to the UI; `shizuku/ClipBridgeService.kt` is the UserService that spawns `ClipBridge.dex` and enforces the shell-UID guard; `SendClipActivity.kt`/`shizuku/PushClient.kt` are the manual-fallback push path (§6.8). |
+| [windows_app/tray.py](windows_app/tray.py) | The laptop side's tray icon + autostart registration, wrapping `copyclip.py`'s own `build_hub()`/`load_config()` unchanged, the daemon itself did not change. `windows_app/dashboard.py` is the legacy tkinter window, kept behind `--legacy-ui`; the current window is described in section 14. |
 
 ---
 
@@ -329,7 +329,7 @@ that was already working. If `FakeContext` fails to initialize for any reason, i
 disabled and text sync is completely unaffected: see `ClipBridge.java`'s `initImaging()`.
 
 This was measured, not assumed, before being built: see
-[bugs/SPIKE-IMAGE-CLIPBOARD.md](bugs/SPIKE-IMAGE-CLIPBOARD.md) for the device spike that
+[docs/bugs/SPIKE-IMAGE-CLIPBOARD.md](docs/bugs/SPIKE-IMAGE-CLIPBOARD.md) for the device spike that
 proved the mechanism on the real S24 Ultra, including two real bugs found in a naive port
 of scrcpy's code (a missing `Looper.prepareMainLooper()`, and `acquireUnstableProvider`
 needing to actually delegate rather than return `null`, which scrcpy itself never needed
@@ -356,7 +356,7 @@ cycle, so both the pass-through-preferring apps and the DIB-only apps can paste 
 **What's still open:** reading a clip URI minted by a *different* app's content provider
 (not CopyClip's own `MediaStore` row), and a live visual paste confirmation into arbitrary
 third-party apps, were not verified during the spike: see
-[bugs/SPIKE-IMAGE-CLIPBOARD.md](bugs/SPIKE-IMAGE-CLIPBOARD.md)'s Q5/Q7. `allow_images`
+[docs/bugs/SPIKE-IMAGE-CLIPBOARD.md](docs/bugs/SPIKE-IMAGE-CLIPBOARD.md)'s Q5/Q7. `allow_images`
 defaults to `false` in `config.json` pending real-use confirmation, matching this project's
 existing convention for BUG-001 through BUG-003.
 
@@ -487,7 +487,7 @@ A companion app installed alongside CopyClip (Sefirah) turned out to place a sma
 image on the real Android clipboard around the moment a screenshot is taken: independent of
 any of its own "sync to PC" toggles, most likely a side effect of its notification listener
 reacting to Android's own "Screenshot captured" system notification via its clipboard
-accessibility service (see `bugs/BUG-006` for the full investigation). `checkScreenshots()`
+accessibility service (see `docs/bugs/BUG-006` for the full investigation). `checkScreenshots()`
 (§6.6a's sibling, the file-based watcher) correctly pushes the real screenshot file; the
 ordinary clipboard-image path (`emitDesc()`/`emitImageDesc()`): needed for real, deliberate
 image copies and otherwise working exactly as designed: has no way to tell this preview
@@ -533,7 +533,7 @@ For a device whose automatic background bridge can't run at all (root-mode Shizu
 pre-Android-11 with no Wireless Debugging pairing, or any future case, §2's pixel update is
 the concrete example), CopyClip needs a path that doesn't depend on that bridge in any way.
 The one clipboard-read permission Android grants with **zero** special setup is being the
-genuinely focused foreground app, the same exemption `bugs/SPIKE-PIXEL-ACCESSIBILITY.md`
+genuinely focused foreground app, the same exemption `docs/bugs/SPIKE-PIXEL-ACCESSIBILITY.md`
 measured is real, just narrower than hoped. "Send Clip" is built entirely on that exemption
 and nothing else:
 
@@ -575,7 +575,7 @@ plain failure rather than silently transcoded, out of scope for a manual one-sho
 
 **Permanently manual, not a gap pending a fix (2026-09-01):** whether the notification's own
 "Send Clip" action could trigger itself automatically on every copy, no tap, was directly
-spiked, not just reasoned about: `bugs/SPIKE-PIXEL-ACCESSIBILITY.md`'s follow-up section
+spiked, not just reasoned about: `docs/bugs/SPIKE-PIXEL-ACCESSIBILITY.md`'s follow-up section
 found the background clipboard-change listener never fires at all while backgrounded on
 this Android version, the notification is denied before any of the app's own code runs.
 There is no mechanism on this platform version to build an automatic trigger on top of, so
@@ -627,7 +627,7 @@ binary file inspection revealed a 197-byte block terminating with the ASCII magi
 (`0x53 0x45 0x46 0x54`). Prior to 2026-09-03, `ClipBridge.java`'s completion check required
 `data[len-2] == 0xFF && data[len-1] == 0xD9`. This caused `isCompleteImage()` to return `false` on
 every Samsung screenshot, triggering an 8-second thread-blocking sleep loop that starved clipboard polling
-and degraded screenshot sync latency from < 1s to 60-90+ seconds (see `bugs/BUG-010-samsung-sef-screenshot-delay.md`).
+and degraded screenshot sync latency from < 1s to 60-90+ seconds (see `docs/bugs/BUG-010-samsung-sef-screenshot-delay.md`).
 
 **2. The Backward Marker Scanning Algorithm:**
 To support arbitrary OEM metadata blocks while maintaining strict protection against partial image reads:
@@ -679,7 +679,7 @@ Before executing `adb push`, `AdbTransport._push_dex()` issues `adb shell stat -
 front of it, unaffected by this) is correct for an ordinary screenshot, but Samsung's scroll
 capture (screenshot inside an app, then "Capture more" repeatedly to extend it) finalizes by
 overwriting that SAME filename with the full stitched image, seconds after the initial
-single-page shot. Measured directly on this hardware (`bugs/BUG-014`, pure filesystem
+single-page shot. Measured directly on this hardware (`docs/bugs/BUG-014`, pure filesystem
 observation with no daemon running): the same-filename overwrite landed 8s and 22s after the
 initial shot across two real captures, always as a clean jump between polls, never
 incremental growth. Once a filename was marked synced, it was never looked at again, so the
@@ -713,19 +713,19 @@ reason: changing one is a real tradeoff, not a free lunch.
 | `dedup_ttl_s` | 90.0 | How long a delivered-content record is remembered per node | Longer than Samsung's ~2.5s relay by a wide margin; short enough that deliberately re-copying the same text later still syncs |
 | `tick_s` | 2.0 (hardcoded in `core/hub.py`) | How often the hub retries the outbox and re-checks domain health | Rarely worth changing |
 | `IDLE_ORPHAN_MS` | 100,000 (hardcoded in `android/ClipBridge.java`) | How long `ClipBridge` can go without hearing from the laptop before suppressing content reads (§6.6) | Must stay comfortably above `idle_ping_s` + its grace window or a healthy-but-quiet connection will falsely trip it |
-| `IMAGE_DESC_HOLD_MS` | 4,500 (hardcoded in `android/ClipBridge.java`) | How long an ordinary clipboard-sourced image is held before being announced, so a real screenshot file push (in either order) can supersede it (§6.6b, `bugs/BUG-006`) | Lower = less delay on a genuine standalone image copy, but less time for a slow screenshot-folder poll tick to catch up; higher = safer against the race, more delay, and a bigger window where two genuinely distinct rapid image copies could collapse into one |
-| `SCREENSHOT_REARM_WINDOW_MS` | 45,000 (hardcoded in `android/ClipBridge.java`) | How long after first syncing a screenshot filename it stays worth re-checking for growth, so a Samsung long screenshot's same-filename overwrite still gets caught (§6.6e, `bugs/BUG-014`) | Lower = less idle stat-checking per screenshot, but risks missing a long screenshot that takes longer than the window to finish stitching; higher = more margin, at the cost of a few more `File.length()` calls per screenshot |
-| `SCREENSHOT_STABILITY_TICKS` | 2 (hardcoded in `android/ClipBridge.java`) | Consecutive 150ms polls at the same file length required before trusting `isCompleteImage()`'s verdict (§6.6e, `bugs/BUG-014`) | Higher = more resistant to a still-being-written file that coincidentally looks terminated, at the cost of a little extra latency on every screenshot |
+| `IMAGE_DESC_HOLD_MS` | 4,500 (hardcoded in `android/ClipBridge.java`) | How long an ordinary clipboard-sourced image is held before being announced, so a real screenshot file push (in either order) can supersede it (§6.6b, `docs/bugs/BUG-006`) | Lower = less delay on a genuine standalone image copy, but less time for a slow screenshot-folder poll tick to catch up; higher = safer against the race, more delay, and a bigger window where two genuinely distinct rapid image copies could collapse into one |
+| `SCREENSHOT_REARM_WINDOW_MS` | 45,000 (hardcoded in `android/ClipBridge.java`) | How long after first syncing a screenshot filename it stays worth re-checking for growth, so a Samsung long screenshot's same-filename overwrite still gets caught (§6.6e, `docs/bugs/BUG-014`) | Lower = less idle stat-checking per screenshot, but risks missing a long screenshot that takes longer than the window to finish stitching; higher = more margin, at the cost of a few more `File.length()` calls per screenshot |
+| `SCREENSHOT_STABILITY_TICKS` | 2 (hardcoded in `android/ClipBridge.java`) | Consecutive 150ms polls at the same file length required before trusting `isCompleteImage()`'s verdict (§6.6e, `docs/bugs/BUG-014`) | Higher = more resistant to a still-being-written file that coincidentally looks terminated, at the cost of a little extra latency on every screenshot |
 | `POLL_MS` | 250 (hardcoded in `android/ClipBridge.java`) | Polling period while device is active and unlocked (§6.6) | 4 ticks/sec ensures sub-300ms clipboard detection with minimal battery footprint |
-| `POLL_MS_LOCKED` | 1,500 (hardcoded in `android/ClipBridge.java`) | Polling period while keyguard is active (§6.6d, `bugs/BUG-012`) | 83% reduction in wakeups and Binder IPC while device is locked; resets immediately to 250ms on unlock |
+| `POLL_MS_LOCKED` | 1,500 (hardcoded in `android/ClipBridge.java`) | Polling period while keyguard is active (§6.6d, `docs/bugs/BUG-012`) | 83% reduction in wakeups and Binder IPC while device is locked; resets immediately to 250ms on unlock |
 | `grace_s` (per domain) | 8.0 | How long a Continuity confirmation probe is given before counting as a miss (§6.5) | Above Samsung's measured ~2.5s relay by a wide margin |
 | `fail_threshold` (per domain) | 3 | Consecutive missed confirmations before a domain is marked degraded (§6.5) | Lower = faster fallback to direct writes, more sensitive to one-off blips |
-| `allow_images` | `true` | Whether image clips sync at all (§6.6a) | Defaults on: real-use confirmation of bugs/SPIKE-IMAGE-CLIPBOARD.md's open Q5/Q7 is complete |
+| `allow_images` | `true` | Whether image clips sync at all (§6.6a) | Defaults on: real-use confirmation of docs/bugs/SPIKE-IMAGE-CLIPBOARD.md's open Q5/Q7 is complete |
 | `max_image_bytes` | 25,165,824 (24 MiB) | Oversize images are **skipped and logged**, never truncated: enforced independently on the laptop (`core/policy.py`) and on each device (`ClipBridge.java`'s own `MAX_IMAGE_BYTES`) | Higher = larger screenshots sync, more memory pressure per transfer on both ends |
 | `image_chunk_bytes` | 49,152 (48 KiB) | Raw bytes per chunk in the `SETB`/`SETC` framing (§6.7a) | Smaller = more `ACK setc` round trips, faster stall detection on a shaky link; larger = fewer round trips, coarser stall detection |
 | `screenshot_backup_dir` | `""` (off) | Local folder every image clip also gets saved into as a plain file (§8, "Two entries in Windows Clipboard History") | Empty disables it entirely; a stopgap for a Windows bug, meant to be removed once Microsoft fixes it |
 | `screenshot_backup_include_devices` | `true` | Whether `screenshot_backup_dir` also covers images synced in *from* the phone/tablet, not just laptop-native ones | `false` limits the backup to laptop screenshots only |
-| `screenshot_exclude_from_history` | `true` | Whether a device-synced image is written with `CanIncludeInClipboardHistory=0`, excluding it from Windows Clipboard History/Win+V (§8, "Two entries in Windows Clipboard History") | `false` lets synced screenshots appear in Win+V again, at the cost of the eviction-of-other-entries issue that motivated this flag in the first place (`bugs/BUG-005`) |
+| `screenshot_exclude_from_history` | `true` | Whether a device-synced image is written with `CanIncludeInClipboardHistory=0`, excluding it from Windows Clipboard History/Win+V (§8, "Two entries in Windows Clipboard History") | `false` lets synced screenshots appear in Win+V again, at the cost of the eviction-of-other-entries issue that motivated this flag in the first place (`docs/bugs/BUG-005`) |
 
 | `allow_sensitive` | `false` | Whether clips tagged sensitive (Android `EXTRA_IS_SENSITIVE`) are allowed to sync (§9.1) | Defaults `false` for defense-in-depth; when `true`, sensitive clips sync with RAM-only outbox, Win+V exclusion, and clean auto-wipe |
 | `sensitive_wipe_s` | `10.0` | How long in seconds before a synced sensitive clip is wiped from the clipboard (§9.1) | Lower = smaller window of credential exposure on the clipboard; higher = more time to paste into a 2FA prompt |
@@ -743,7 +743,7 @@ reason: changing one is a real tradeoff, not a free lunch.
 
 Condensed postmortems, each as symptom → root cause → fix. Earlier incidents
 (toast storm from Link-to-Windows/Phone Link, `EmptyClipboard err=1418` data loss, duplicate
-daemon instances) are documented in full in [bugs/](bugs/README.md) and not repeated here.
+daemon instances) are documented in full in [docs/bugs/](docs/bugs/README.md) and not repeated here.
 
 **Repeat copies silently dropped.** *Symptom:* copying the exact same text twice never
 reached a device that missed the first delivery. *Cause:* the hub bailed out of routing
@@ -795,13 +795,13 @@ turning off Windows' own auto-save loses the file it used to drop in
 config once Microsoft fixes the underlying bug and Windows' own setting is safe to re-enable.
 *Second follow-up:* the local backup feature itself surfaced a real Android-side bug (a
 screenshot re-touched in place by a background process got re-pushed as if new: full
-writeup in `bugs/BUG-005-duplicate-screenshot-push.md`) plus a related Windows Clipboard
+writeup in `docs/bugs/BUG-005-duplicate-screenshot-push.md`) plus a related Windows Clipboard
 History symptom, large device-synced images evicting the user's other Win+V entries.
 Neither is a CopyClip-caused clearing bug (confirmed: no code in this repo calls any
 clipboard-history API), but `config.json`'s `screenshot_exclude_from_history` (§7) now
 excludes device-synced images from History entirely as the only available fix, trading
 away that image's own Win+V visibility for not disturbing the rest of the user's history: 
-see `bugs/BUG-005` for the full investigation, including why no way to have both exists.
+see `docs/bugs/BUG-005` for the full investigation, including why no way to have both exists.
 
 **(2026-08-22) A companion app's clipboard accessibility service caused a second,
 spurious backup file per phone screenshot.** *Symptom:* one phone screenshot produced two
@@ -826,7 +826,7 @@ clipboard via its accessibility service. *Fix:* §6.6b: a defense-in-depth timin
 coordination in `ClipBridge.java` between the file watcher and the ordinary clipboard-image
 path, since the real fix (disabling Sefirah's Accessibility Service permission) is a device
 setting, not something this codebase can apply. Full writeup:
-`bugs/BUG-006-screenshot-clipboard-preview-duplicate.md`.
+`docs/bugs/BUG-006-screenshot-clipboard-preview-duplicate.md`.
 
 **(2026-08-23) Copying a link (not plain-selected text) on the phone never reached the
 laptop.** *Symptom:* ordinary copied text always synced; a long URL copied via a "Copy
@@ -845,7 +845,7 @@ under. `emitCurrentClip()` already recognized and forwarded the content correctl
 prefers `text/plain`/`text/html` whenever the source declares one, using the same
 `hasMimeType()` precedence `emitCurrentClip()`'s own accept/reject gate already relies on,
 one function, no wire protocol or config change. Full writeup, including what remains
-unconfirmed: `bugs/BUG-007-long-link-copy-rejected-as-non-text.md`.
+unconfirmed: `docs/bugs/BUG-007-long-link-copy-rejected-as-non-text.md`.
 
 **(2026-08-23) A whole unmerged branch, `feature/lan-fallback-tls`, turned up during
 cleanup of leftover files from the same investigation.** *Context:* while reviewing loose,
@@ -954,7 +954,7 @@ same shape as the previous day's:* a device's constraint (pixel needs Shizuku, t
 root-refused, therefore needs a fallback) had been treated as ruling out its most basic tier
 too, without that being separately checked. The manual-rearm cost of Tier 1 was already
 being paid for other reasons (this session also produced a re-arm convenience script,
-`<software>\Phone\Pixel\rearm_wireless_adb.bat`, personal tooling outside this repo); it
+`<local tools folder>`, personal tooling outside this repo); it
 just hadn't been connected to "therefore Tier 1 works here too."
 
 **(2026-08-31) `Theme.NoDisplay` does not qualify for Android's clipboard-focus exemption,
@@ -965,7 +965,7 @@ measure-before-concluding rule, rather than trusting that "the Activity started"
 equivalent to "the Activity is focused." *Measured:* `adb logcat` around a real tap showed
 `ActivityTaskManager: START ... SendClipActivity` followed immediately by `ClipboardService:
 Denying clipboard access to com.mohitarora.copyclip, application is not in focus neither is
-a system service`, the exact restriction message from `bugs/SPIKE-PIXEL-ACCESSIBILITY.md`,
+a system service`, the exact restriction message from `docs/bugs/SPIKE-PIXEL-ACCESSIBILITY.md`,
 on an Activity that had, by every other measure, just started as the topmost task. *Root
 cause:* `Theme.NoDisplay` is defined to never actually create/show a window (that's its
 entire purpose), and window focus, not merely being the started/topmost activity, is what
@@ -1005,7 +1005,7 @@ atomic-write pattern) persists the last-seen hash per device across process rest
 genuine content change during downtime is applied instead of dropped; a companion AHK-side
 guard (outside this repo, confirmed already present) skips the restart entirely when a
 single healthy instance is already running. Full writeup:
-`bugs/BUG-008-restart-drops-baseline.md`.
+`docs/bugs/BUG-008-restart-drops-baseline.md`.
 
 **(2026-09-05) Google Authenticator and credential manager clips dropped at edge policy.**
 *Symptom:* Copying a code in Google Authenticator on Android didn't sync automatically to the
@@ -1020,7 +1020,7 @@ re-copied from the Samsung clipboard history tray or edge panel, Samsung's UI cr
 false on the second copy. *Fix:* Added `"allow_sensitive": true` configuration, wire protocol
 `CONF`/`SETS`, outbox volatile RAM-only guard (`self._sensitive_entries` never written to disk),
 Windows endpoint hardening (`CF_CAN_INCLUDE_IN_HISTORY=0`, `CF_CAN_UPLOAD_TO_CLOUD=0`), and clean
-auto-wipe (§9.1). Full writeup: `bugs/BUG-013-sensitive-clip-sync-winv-blank-tile-and-timer-race.md`.
+auto-wipe (§9.1). Full writeup: `docs/bugs/BUG-013-sensitive-clip-sync-winv-blank-tile-and-timer-race.md`.
 
 **(2026-09-05) Sensitive auto-wipe left an empty white card in Windows Clipboard History (Win+V).**
 *Symptom:* After the auto-wipe countdown (10s) expired on Windows, pressing `Win+V` displayed an
@@ -1160,7 +1160,7 @@ hardened lifecycle end-to-end:
 - Level is controlled by `config.json`'s `log_level` (default `INFO`: meant for the
   production instance) or overridden per run with `--log-level DEBUG`.
 - **The production instance is launched by an external AutoHotkey setup, not by anything in
-  this repo.** `<software>\Programming\AutoHotKey\AllScripts\BasicTasks.ahk`'s auto-execute
+  this repo.** `<local tools folder>`'s auto-execute
   section unconditionally force-restarts `copyclip.py` (via its `RestartNamedPythonServer()`
   helper: kill any existing instance: matched by name if it's a previous run of this same
   helper, or by command line for a leftover generic `pythonw.exe`: then relaunch hidden
@@ -1205,7 +1205,7 @@ though only text sync got built for v1.0.0.
 No longer future scope. Image clipboard sync (Windows ↔ Samsung, both directions) is
 implemented: see §6.6a (Android/MediaStore mechanics) and §6.7a (chunked framing, outbox
 sidecar). The pre-implementation device spike and its findings are in
-[bugs/SPIKE-IMAGE-CLIPBOARD.md](bugs/SPIKE-IMAGE-CLIPBOARD.md). `IMAGE_MIMES` in
+[docs/bugs/SPIKE-IMAGE-CLIPBOARD.md](docs/bugs/SPIKE-IMAGE-CLIPBOARD.md). `IMAGE_MIMES` in
 `core/models.py`, `winimage.py` (new), and the `SETB`/`SETC`/`CLIPB`/`CLIPC` wire verbs
 (§5) are the pieces that landed; text's existing code paths are untouched throughout.
 
@@ -1223,7 +1223,7 @@ Motivated by a real incident: phone -> laptop sync stopped for hours at a time, 
 Android's Doze mode silently killing the phone's Tailscale connection during idle, not
 anything on the Windows side (a well-reasoned alternate hypothesis, the clipboard listener
 going stale after sleep, was spiked and disproved first; see
-[bugs/SPIKE-WINDOWS-CLIPBOARD-LISTENER.md](bugs/SPIKE-WINDOWS-CLIPBOARD-LISTENER.md) on that
+docs/bugs/SPIKE-WINDOWS-CLIPBOARD-LISTENER.md (write-up was not kept) on that
 branch). `transports/framing.py`'s existing HMAC-SHA256 scheme is authorization/anti-replay
 only and assumes Tailscale's WireGuard tunnel supplies confidentiality; a same-WiFi fallback
 has no such tunnel, so the branch wraps the Tier 2 (Termux) socket in TLS 1.2+ (stdlib `ssl`,
@@ -1232,7 +1232,7 @@ a device's normal address first, then an optional `lan_host`, and treating a han
 failure as a hard error rather than a silent plaintext fallback. Confirmed end-to-end on real
 devices, both directions, both network states, with three real `rish`-invocation bugs found
 and fixed along the way; see
-[bugs/SPIKE-LAN-TLS-FALLBACK.md](bugs/SPIKE-LAN-TLS-FALLBACK.md) on that branch for the full
+docs/bugs/SPIKE-LAN-TLS-FALLBACK.md (write-up was not kept) on that branch for the full
 measured record.
 
 **Why it's not on `main` yet, by its own commit message:** intermittent `READY` timeouts not
@@ -1241,9 +1241,9 @@ the test phone), and images/tablet/a live packet capture/unauthorized-device rej
 never exercised over this path. Off by default even on its own branch
 (`config.json` keeps both devices on `"transport": "adb"`); opt-in per device once the gaps
 above are addressed. That branch's own unrelated daemon-restart-baseline-drop fix was
-extracted and landed on `main` separately as [BUG-008](bugs/BUG-008-restart-drops-baseline.md);
+extracted and landed on `main` separately as [BUG-008](docs/bugs/BUG-008-restart-drops-baseline.md);
 its link-copy mime fix was superseded by the equivalent, already-shipped fix in
-[BUG-007](bugs/BUG-007-long-link-copy-rejected-as-non-text.md), both discovered when this
+[BUG-007](docs/bugs/BUG-007-long-link-copy-rejected-as-non-text.md), both discovered when this
 branch turned up during a 2026-08-23 documentation pass.
 
 ### Files, via Taildrop handoff
@@ -1280,7 +1280,7 @@ is device-side, not code-side: wireless adb must be armed once with the device o
 `persist.adb.tcp.port` does not survive a reboot on any of these devices.
 
 **Follow-up, same day:** a real, separate crash was then found and fixed on this device:
-[BUG-009](bugs/BUG-009-pixel-clipbridge-printstream-crash.md), a `PrintStream` constructor
+[BUG-009](docs/bugs/BUG-009-pixel-clipbridge-printstream-crash.md), a `PrintStream` constructor
 missing from Android 10's core library, invisible on `phone`/`tab` since they run much newer
 Android. Once fixed, `pixel` connected and read cleanly, but a second, unresolved question
 (a write-path timeout, never conclusively explained) surfaced before it could be fully
@@ -1295,11 +1295,51 @@ config line this section always promised.
 
 ---
 
+## 14. Windows app architecture (2026-11)
+
+Why it changed: the Tk dashboard ran inside the tray process and crashed it (six identical `tcl86t.dll` faults, see [BUG-018](docs/bugs/BUG-018-dashboard-tcl-crash-takes-down-sync.md)), so a UI fault could stop clipboard sync. The rule now is that **nothing about the window can affect sync**.
+
+```
+  tray process (python, stdlib only)                     separate process
+  +----------------------------------------+           +-----------------------+
+  |  Hub + nodes + push listener  (sync)    |           |  Edge --app window    |
+  |  ControlService  (all UI-facing logic)  | <- JSON ->|  windows_app/ui/*     |
+  |  ControlServer   (127.0.0.1, token)     |  loopback |  vanilla JS, no deps  |
+  |  TrayApp         (Win32 menu, ctypes)   |           +-----------------------+
+  +----------------------------------------+
+```
+
+| Piece | Responsibility |
+| :--- | :--- |
+| `core/config.py` | The single source of defaults, validation, migration, atomic save, key-file reading and the live-versus-restart classification of every setting |
+| `core/activity.py` | In-memory ring of recent clips for the Activity screen. Never written to disk or the log; sensitive clips and images carry no preview |
+| `core/interfaces.py` | The `ClipboardNode` interface the hub depends on. `nodes/base.py` re-exports it. `core/` imports no node, domain, transport or UI module, which `tests/unit/test_architecture.py` enforces |
+| `core/logsetup.py` | Rotating log plus `FoldingHandler`, which collapses repeated identical records |
+| `windows_app/service.py` | Every operation the UI can ask for, as plain methods with injected side effects (open folder, run adb, read clipboard, restart). Fully unit-tested without HTTP |
+| `windows_app/control_api.py` | A thin router over the service, plus the security rules (loopback, token, Host and Origin checks, fixed static files) |
+| `windows_app/launcher.py` | Finds a Chromium browser (the default one first, then Edge, Brave, Chrome) and opens the app window or tray flyout in a private per-browser profile. `WindowSlot` guarantees a single window: focus it if it exists, ignore requests while one is opening, move to the next browser only if none appeared. Also shows the native folder picker in a child process |
+| `windows_app/tray.py` | Win32 tray icon and menu. Every window launch is wrapped so a failure can never reach the message loop |
+
+### How a setting change flows
+
+1. The window sends only the changed keys to `PUT /api/config`.
+2. `ControlService.put_config` merges them into the file **as it is on disk now**, validates the whole result, and rejects it with every problem listed if it is invalid.
+3. `classify_changes` splits the keys into live and restart-required. The file is saved atomically.
+4. Live keys go to `Hub.reload_config`, which applies only the keys that are present. Restart-required keys are reported back so the window can offer a restart.
+
+### Local API surface
+
+`GET status | activity | logs | config | key`, `PUT config`, `POST pause`, `devices/<name>/pause|resume|reconnect`, `devices/test`, `devices` (add), `PUT/DELETE devices/<name>`, `key/rotate`, `folders/open`, `send-clipboard`, `logs/clear`, `activity/clear`, `pick-folder`, `ui/open`, `restart`, `quit`, `ping`. Security rules: [SECURITY.md](SECURITY.md).
+
+### Still open
+
+The startup cost and memory of the app window have not been measured. On the one machine tested, Edge produced no window and Brave (the default browser) did, which is why the launcher prefers the default Chromium browser and escalates.
+
 ## 13. Where to go for more
 
 - [README.md](README.md): setup, config reference, troubleshooting, quick architecture
   diagram.
-- [bugs/](bugs/README.md): detailed, dated writeups of specific past incidents, with
+- [docs/bugs/](docs/bugs/README.md): detailed, dated writeups of specific past incidents, with
   measured evidence, root cause, fix, and rollback instructions for each.
 - [otherCopyProjects/NOTES.md](otherCopyProjects/NOTES.md): what was adopted or rejected
   from prior art (scrcpy, ClipCascade, and others) and why.

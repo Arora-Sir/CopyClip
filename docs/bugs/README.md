@@ -1,7 +1,7 @@
 # CopyClip bug tracker
 
 Open issues live here as markdown, one file per bug, so the current state of the system is
-written down rather than remembered. A bug stays **OPEN** until the owner confirms it is fixed
+written down rather than remembered. A bug stays **OPEN** until the maintainer confirms it is fixed
 in real use, not merely when a test passes.
 
 ## Status
@@ -25,6 +25,13 @@ in real use, not merely when a test passes.
 | [BUG-015](BUG-015-screenshot-deletion-historical-resync.md) | Deleting newest screenshot or camera photo triggers false resync of older files | Medium-High (unwanted re-sync) | **CONFIRMED, fixed and verified live on hardware (2026-10-29)** |
 | [BUG-016](BUG-016-orphaned-clipbridge-duplicate-process.md) | Wireless ADB connection drops leave orphaned ClipBridge processes running on device | Medium (duplicate polling) | **CONFIRMED, fixed and verified live on hardware (2026-10-29)** |
 | [BUG-017](BUG-017-dibv5-paste-synthesis-latency.md) | Single DIBV5 format write causes multi-second paste stall in Chromium and Electron desktop apps | Medium-High (10-second paste lag) | **CONFIRMED, fixed and verified live on hardware (2026-10-29)** |
+| [BUG-018](BUG-018-dashboard-tcl-crash-takes-down-sync.md) | Opening the Tk dashboard crashes the whole tray process (Tcl panic, same fault offset six times), taking sync down | **High** | **FIXED IN CODE, OPEN until confirmed in real use** |
+| [BUG-019](BUG-019-repeated-errors-flood-the-log.md) | One repeated failure writes thousands of identical tracebacks and buries real history | Medium | **PARTLY FIXED**, clipboard-held cause OPEN |
+| [BUG-020](BUG-020-robustness-and-security-hardening-batch.md) | Fifteen robustness and security gaps from the audit and fuzzing (paused outbox loss, TCP hang, unbounded reads, PID kill) | Medium-High | **FIXED IN CODE with tests, OPEN until real use** |
+| [BUG-021](BUG-021-newline-style-changes-clip-identity.md) | CRLF and LF versions of the same text hash differently | Unknown | **OPEN, not measured** |
+| [BUG-022](BUG-022-tray-click-opens-many-windows-and-white-focus-ring.md) | Tray click opened several windows, the window ran inside the daily browser, and a white focus ring framed the content | Medium | **FIXED IN CODE, verified on the maintainer's PC, OPEN until everyday use** |
+| [BUG-023](BUG-023-screenshot-resave-twin-and-silent-exits.md) | One screenshot arrived twice with different bytes, and the daemon could exit without a trace | Medium | **FIXED IN CODE, OPEN until live check on both devices** |
+| [BUG-024](BUG-024-logs-screen-scroll-jump-and-preview-clips.md) | Logs screen jumped on open, startup warning top right, small preview images synced as clips | Low | **FIXED IN CODE, OPEN until everyday use** |
 
 ## Companion files
 

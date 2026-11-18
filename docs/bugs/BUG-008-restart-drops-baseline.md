@@ -153,7 +153,7 @@ the store reflects both directions.
 Code-only; `git revert`. `core/hub.py` degrades to its exact pre-fix behavior if
 `baseline_store=None` is passed (the parameter is optional). The AHK change is a single
 function in `BasicTasks.ahk` outside this repo
-(`<software>\Programming\AutoHotKey\AllScripts\BasicTasks.ahk`); it predates and is
+(`<local tools folder>`); it predates and is
 independent of this commit either way.
 
 ## Open points
