@@ -221,7 +221,7 @@ never routes a clip back to its origin node), so this can never affect the user'
 captures, only ones synced in from a device.
 
 **This remains partially a spike**, per this project's own "measure before concluding, spike
-unproven platform behavior" rule (`docs/bugs/SPIKE-IMAGE-CLIPBOARD.md` precedent) — the two things
+unproven platform behavior" rule (`docs/bugs/SPIKE-IMAGE-CLIPBOARD.md` precedent), the two things
 certain from documentation are that the excluded item won't appear in Win+V's list and that
 Ctrl+V still pastes it correctly; whether exclusion also stops it from evicting *other*
 entries needed live confirmation, not just code review.
