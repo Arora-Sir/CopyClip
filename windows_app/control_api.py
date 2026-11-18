@@ -50,11 +50,16 @@ class RawReply:
         self.data, self.mime = data, mime
 
 
+class _BacklogHTTPServer(ThreadingHTTPServer):
+    # The stdlib default backlog is 5, which Windows answers with connection refused when a burst of requests arrives together.
+    request_queue_size = 128
+
+
 class ControlServer:
     def __init__(self, service: ControlService, *, port: int = 0, token: str | None = None) -> None:
         self.service = service
         self.token = token or secrets.token_urlsafe(24)
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", port), self._make_handler())
+        self._httpd = _BacklogHTTPServer(("127.0.0.1", port), self._make_handler())
         self._httpd.daemon_threads = True
         self.port = self._httpd.server_address[1]
         self._thread: threading.Thread | None = None

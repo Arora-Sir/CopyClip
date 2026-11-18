@@ -28,3 +28,7 @@ Medium to High (several are latent data-loss or exposure paths).
 - `BaselineStore` and the outbox still fsync inside the routing lock.
 - The HMAC handshake is still implemented three times (`tcp_transport`, `push_listener`, `android_node`).
 - `winimage` still computes the row flip twice for DIB and DIBV5.
+
+## Addendum 2026-11-18: control API listen backlog
+
+`test_hammering_the_server_from_many_threads` failed roughly one run in five with `ConnectionRefusedError` (10061). The control server used the stdlib default listen backlog of 5, and Windows refuses connections once a burst of requests exceeds it. `ControlServer` now uses a `ThreadingHTTPServer` subclass with `request_queue_size = 128`. Measured after the change: 0 failures in 12 runs of `tests.unit.test_aggressive` and 0 in 8 full-suite runs. Status: fixed, confirmed by repeated test runs, not yet observed under real UI use.
