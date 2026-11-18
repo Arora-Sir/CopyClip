@@ -29,7 +29,7 @@ from core import config as cfgmod  # noqa: E402
 CFG = cfgmod.load_config(os.path.join(ROOT, "config.json"), validate_values=False)
 DEV = {d["name"]: d["device"] for d in CFG["devices"] if d.get("enabled", True)}
 TEST_DEVICES = ("phone", "tab")
-BRIDGE = "CLASSPATH=/data/local/tmp/clipbridge.dex app_process / me.mohit.copyclip.ClipBridge"
+BRIDGE = "CLASSPATH=/data/local/tmp/clipbridge.dex app_process / com.mohitarora.copyclip.ClipBridge"
 CONTINUITY_WAIT = 8.0
 results: list[tuple[str, bool]] = []
 

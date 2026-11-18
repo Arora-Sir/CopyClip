@@ -34,7 +34,7 @@ _enabled = [d for d in CFG.get("devices", []) if d.get("enabled", True)]
 _phone = next((d for d in _enabled if d["name"] == "phone"), _enabled[0] if _enabled else None)
 DEV = _phone["device"] if _phone else CFG["device"]
 ONESHOT = ("CLASSPATH=/data/local/tmp/clipbridge.dex app_process / "
-           "me.mohit.copyclip.ClipBridge")
+           "com.mohitarora.copyclip.ClipBridge")
 
 results: list[tuple[str, bool, str]] = []
 

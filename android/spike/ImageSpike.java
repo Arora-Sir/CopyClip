@@ -1,4 +1,4 @@
-package me.mohit.copyclip.spike;
+package com.mohitarora.copyclip.spike;
 
 import android.app.Application;
 import android.app.Instrumentation;

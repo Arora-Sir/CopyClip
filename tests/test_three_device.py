@@ -26,7 +26,7 @@ import winclip  # noqa: E402
 CFG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
 DEV = {d["name"]: d["device"] for d in CFG["devices"] if d.get("enabled", True)}
 BRIDGE = ("CLASSPATH=/data/local/tmp/clipbridge.dex app_process / "
-          "me.mohit.copyclip.ClipBridge")
+          "com.mohitarora.copyclip.ClipBridge")
 
 # Samsung took ~2.0-2.5 s to mirror in measurement; give it generous headroom.
 CONTINUITY_WAIT = 7.0

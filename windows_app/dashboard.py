@@ -67,7 +67,7 @@ _is_open = False
 def open_dashboard(hub, cfg: dict | None = None, initial_tab: int = 0) -> None:
     global _is_open
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.mohitarora.copyclip")
     except Exception:
         pass
     with _open_lock:
@@ -83,7 +83,7 @@ def _apply_win11_attributes(root: tk.Tk | tk.Toplevel) -> None:
     """Enables Windows 11 dark title bar, smooth rounded corners, and consistent icon."""
     try:
         # Decouple process from generic python.exe/tk taskbar group to prevent feather icon
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.mohitarora.copyclip")
     except Exception:
         pass
 
@@ -201,7 +201,7 @@ def _run(hub, cfg_initial: dict | None = None, initial_tab: int = 0) -> None:
     global _is_open
     try:
         try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.mohitarora.copyclip")
         except Exception:
             pass
         root = tk.Tk()

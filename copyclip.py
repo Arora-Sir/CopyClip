@@ -23,7 +23,7 @@ import time
 if os.name == "nt":
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.mohitarora.copyclip")
     except Exception:
         pass
 

@@ -1048,7 +1048,7 @@ CopyClip icon. *Root cause:* Tkinter's default window class icon is the feather
 (`wish.exe`/`tk86t.dll`). `SetCurrentProcessExplicitAppUserModelID` was called after Shell/Tkinter
 initialization. Additionally, Tkinter's `root.winfo_id()` only resolves the inner client widget,
 not the top-level DWM window manager frame (`root.wm_frame()`). *Fix:* Stamped
-`SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")` early on module import and main()
+`SetCurrentProcessExplicitAppUserModelID("com.mohitarora.copyclip")` early on module import and main()
 before Tk initialization in `copyclip.py`, `tray.py`, and `dashboard.py`. Sent `WM_SETICON`
 (`ICON_BIG` and `ICON_SMALL`) to `wm_frame()`, `GetParent()`, and `winfo_id()`.
 

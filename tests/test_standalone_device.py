@@ -34,7 +34,7 @@ import winclip  # noqa: E402
 from transports.framing import challenge_response, new_nonce, seal, verify_challenge  # noqa: E402
 
 BRIDGE = ("CLASSPATH=/data/local/tmp/clipbridge.dex app_process / "
-          "me.mohit.copyclip.ClipBridge")
+          "com.mohitarora.copyclip.ClipBridge")
 
 LOG_PATH = os.path.join(ROOT, "logs", "copyclip.log")
 

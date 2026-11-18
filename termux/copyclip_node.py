@@ -28,7 +28,7 @@ import threading
 
 DEFAULT_PORT = 8385
 DEX = os.path.expanduser("~/clipbridge.dex")
-MAIN = "me.mohit.copyclip.ClipBridge"
+MAIN = "com.mohitarora.copyclip.ClipBridge"
 
 
 # --- framing (mirror of transports/framing.py) ---------------------------

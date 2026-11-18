@@ -1,4 +1,4 @@
-package me.mohit.copyclip;
+package com.mohitarora.copyclip;
 
 import android.app.Application;
 import android.app.Instrumentation;

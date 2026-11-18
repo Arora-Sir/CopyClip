@@ -42,7 +42,7 @@ from windows_app.control_api import ControlServer  # noqa: E402
 from windows_app.service import ControlService  # noqa: E402
 
 try:
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.mohitarora.copyclip")
 except Exception:
     pass
 

@@ -33,7 +33,7 @@ CFG = json.load(open(CFG_PATH, encoding="utf-8"))
 DEV = {d["name"]: d["device"] for d in CFG["devices"] if d.get("enabled", True)}
 SCREENSHOT_DIR = CFG.get("screenshot_backup_dir")
 
-BRIDGE = "CLASSPATH=/data/local/tmp/clipbridge.dex app_process / me.mohit.copyclip.ClipBridge"
+BRIDGE = "CLASSPATH=/data/local/tmp/clipbridge.dex app_process / com.mohitarora.copyclip.ClipBridge"
 
 results: list[tuple[str, bool, str]] = []
 
@@ -239,7 +239,7 @@ def run_tests() -> bool:
 
     # 2.3 Idle CPU check on Phone
     time.sleep(2.0)  # Settle ADB execution overhead before sampling idle CPU
-    clip_pids = _sh(DEV["phone"], "pgrep -f 'me.mohit.copyclip.ClipBridge'").split()
+    clip_pids = _sh(DEV["phone"], "pgrep -f 'com.mohitarora.copyclip.ClipBridge'").split()
     if clip_pids:
         pid = clip_pids[-1]
         cpu_raw = _sh(DEV["phone"], f"top -b -n 1 -p {pid} -o %CPU | tail -n 1").strip()

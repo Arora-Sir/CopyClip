@@ -104,12 +104,9 @@ class BridgeServer(
         val theirNonce = challengeLine.removePrefix("CHALLENGE ")
         writeLine("RESPONSE ${Framing.challengeResponse(hmacKey, theirNonce)}")
 
-        // "me.mohit.copyclip.ClipBridge", not this app's own com.mohitarora.copyclip package,
-        // on purpose: this names a class already compiled into clipbridge.dex (from
-        // android/ClipBridge.java, which was never recompiled or renamed), not anything in
-        // this app's own source. The two packages are independent by design -- app_process
-        // just needs the exact class name the dex actually contains.
-        val proc = ProcessBuilder("app_process", "/", "me.mohit.copyclip.ClipBridge", "serve")
+        // NOTE: this names the ClipBridge class compiled into clipbridge.dex from android/ClipBridge.java, not a class in this app's own source.
+        // NOTE: app_process needs the exact class name the dex contains, so a package rename in ClipBridge.java must be mirrored here.
+        val proc = ProcessBuilder("app_process", "/", "com.mohitarora.copyclip.ClipBridge", "serve")
             .apply { environment()["CLASSPATH"] = dexPath }
             .redirectErrorStream(true)
             .start()

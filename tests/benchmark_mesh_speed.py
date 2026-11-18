@@ -33,7 +33,7 @@ CFG_PATH = os.path.join(ROOT, "config.json")
 CFG = json.load(open(CFG_PATH, encoding="utf-8"))
 DEV = {d["name"]: d["device"] for d in CFG["devices"] if d.get("enabled", True)}
 
-BRIDGE = "CLASSPATH=/data/local/tmp/clipbridge.dex app_process / me.mohit.copyclip.ClipBridge"
+BRIDGE = "CLASSPATH=/data/local/tmp/clipbridge.dex app_process / com.mohitarora.copyclip.ClipBridge"
 
 # Target SLA Latency Limits (ms)
 LIMITS = {

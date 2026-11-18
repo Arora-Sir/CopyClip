@@ -84,3 +84,5 @@ Two rules that came out of BUG-001 and are worth keeping:
 3. **Measure content, not just events.** BUG-003's first measurement counted clipboard
    *changes* and appeared to confirm a duplicate that was really unrelated copying on the
    laptop. Counting transitions into a known content hash gave the correct answer.
+
+Note: writeups dated before 2026-11-18 quote the on-device helper as `me.mohit.copyclip.ClipBridge`. It is now `com.mohitarora.copyclip.ClipBridge`, matching the Android app package.

@@ -24,7 +24,9 @@ from . import Transport, TransportError
 log = logging.getLogger("copyclip.adb")
 
 REMOTE_DEX = "/data/local/tmp/clipbridge.dex"
-MAIN_CLASS = "me.mohit.copyclip.ClipBridge"
+MAIN_CLASS = "com.mohitarora.copyclip.ClipBridge"
+# NOTE: the helper class used this package before 2026-11-18; stopping it on start avoids a duplicate bridge after an upgrade.
+LEGACY_MAIN_CLASS = "me.mohit.copyclip.ClipBridge"
 
 # app_process needs a nominal "command directory" argument before the class name.
 SERVE_CMD = f"CLASSPATH={REMOTE_DEX} app_process / {MAIN_CLASS} serve"
@@ -111,7 +113,7 @@ class AdbTransport(Transport):
     def start(self) -> None:
         self._ensure_connected()
         try:
-            self._adb("shell", "pkill -f me.mohit.copyclip.ClipBridge 2>/dev/null || true", timeout=5)
+            self._adb("shell", f"pkill -f {MAIN_CLASS} 2>/dev/null || true; pkill -f {LEGACY_MAIN_CLASS} 2>/dev/null || true", timeout=5)
         except Exception:
             pass
         self._push_dex()
