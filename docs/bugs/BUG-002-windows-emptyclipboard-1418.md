@@ -95,3 +95,9 @@ Code-only; `git revert` the commit. No device or system state was changed for th
   a delivery, reopen this bug: that would mean the retry path itself is failing.
 - Worth watching whether Windows Clipboard History is implicated. If failures cluster, the
   next step is testing with clipboard history disabled to confirm or rule out `cbdhsvc`.
+
+## Addendum 2026-11-18: read side of the same 1418 quirk
+
+The write side was hardened in September. A probe on 2026-11-18 showed the read side has the same exposure: right after a write, `OpenClipboard` succeeds and `IsClipboardFormatAvailable` is true, yet `GetClipboardData` returns NULL with error 1418 and `EnumClipboardFormats` lists nothing. The data is present again about 300 ms later and the sequence number does not change in between. `read_text()` treated the NULL handle as "no text", so a clip could be missed silently.
+
+Measured before the change: 400 write then `read_text()` cycles returned `None` 5 and 6 times (about 1.4 percent) with the daemon stopped. `read_text()` now retries up to 4 more times, 30 ms apart, with a fresh open each time, and only when the format is available but the handle is NULL. A missing format still returns `None` at once. Measured after: 1200 cycles, 0 misses. `tests/unit/test_winclip_read_retry.py` pins the behaviour with fakes. The process that briefly holds the clipboard was never identified, so the cause remains inferred. Status: fixed and confirmed by measurement, not yet confirmed in real use.
