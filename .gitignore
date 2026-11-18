@@ -97,3 +97,6 @@ desktop.ini
 PROJECT_TRACKER.md
 
 HANDOFF.md
+
+# The Gradle wrapper jar must be tracked so a fresh clone can build the app
+!android_app/gradle/wrapper/gradle-wrapper.jar
