@@ -251,6 +251,26 @@ class PauseTests(Base):
             with self.assertRaises(ServiceError):
                 self.svc.device_pause(bad, True)
 
+    def test_device_pause_survives_a_restart(self):
+        self.svc.device_pause("tab", True)
+        self.svc.device_pause("phone", True)
+        self.svc.device_pause("phone", False)
+        hub2 = Hub(nodes=list(self.nodes.values()), domains=[], policy=Policy(),
+                   outbox=Outbox(os.path.join(self.tmp.name, "state", "o2.json")))
+        ControlService(hub2, config_path=self.cfg_path, logs_dir=self.logs,
+                       key_path=os.path.join(self.tmp.name, "copyclip.key"))
+        self.assertTrue(hub2.is_device_paused("tab"))
+        self.assertFalse(hub2.is_device_paused("phone"))
+
+    def test_corrupt_paused_list_is_ignored(self):
+        path = os.path.join(self.tmp.name, "state", "paused_devices.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        ControlService(self.hub, config_path=self.cfg_path, logs_dir=self.logs,
+                       key_path=os.path.join(self.tmp.name, "copyclip.key"))
+        self.assertFalse(self.hub.is_device_paused("tab"))
+
 
 class DeviceTests(Base):
     def test_add_edit_delete_roundtrip_and_restart_flag(self):

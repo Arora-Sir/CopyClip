@@ -8,6 +8,7 @@ device, folder or clipboard.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -97,6 +98,8 @@ class ControlService:
         self._pause_timer: threading.Timer | None = None
         self.paused_until: float | None = None
         self._ui_last_ping = 0.0
+        self._paused_devices_path = os.path.join(self.root_dir, "state", "paused_devices.json")
+        self._load_paused_devices()
         self._nav = {"route": "", "id": 0}
         self._cfg_lock = threading.Lock()
         # Settings that are applied by something other than Hub.reload_config. The tray adds
@@ -293,7 +296,28 @@ class ControlService:
     def device_pause(self, name: str, paused: bool) -> dict:
         self._known_node(name)
         (self.hub.pause_device if paused else self.hub.resume_device)(name)
+        self._save_paused_devices()
         return {"name": name, "paused": paused}
+
+    def _load_paused_devices(self) -> None:
+        try:
+            with open(self._paused_devices_path, encoding="utf-8") as f:
+                names = json.load(f)
+        except (OSError, ValueError):
+            return
+        for name in names if isinstance(names, list) else []:
+            if isinstance(name, str) and name != "laptop":
+                self.hub.pause_device(name)
+
+    def _save_paused_devices(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._paused_devices_path), exist_ok=True)
+            tmp = self._paused_devices_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(sorted(self.hub.paused_devices), f)
+            os.replace(tmp, self._paused_devices_path)
+        except OSError:
+            log.warning("could not persist the paused device list", exc_info=True)
 
     def _known_node(self, name: str) -> None:
         if name not in self.hub.nodes or name == "laptop":

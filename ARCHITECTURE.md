@@ -1329,7 +1329,7 @@ Why it changed: the Tk dashboard ran inside the tray process and crashed it (six
 
 ### Local API surface
 
-`GET status | activity | logs | config | key`, `PUT config`, `POST pause`, `devices/<name>/pause|resume|reconnect`, `devices/test`, `devices` (add), `PUT/DELETE devices/<name>`, `key/rotate`, `folders/open`, `send-clipboard`, `logs/clear`, `activity/clear`, `pick-folder`, `ui/open`, `restart`, `quit`, `ping`. Security rules: [SECURITY.md](SECURITY.md).
+`GET status | activity | logs | config | key`, `PUT config`, `POST pause`, `devices/<name>/pause|resume|reconnect`, `devices/test`, `devices` (add), `PUT/DELETE devices/<name>`, `key/rotate`, `folders/open`, `send-clipboard`, `logs/clear`, `activity/clear`, `pick-folder`, `ui/open`, `restart`, `quit`, `ping`. The per-device pause list is saved to `state/paused_devices.json` on every toggle and reloaded at start, so a paused device stays paused after a restart (the global pause and its timer are not persisted). Security rules: [SECURITY.md](SECURITY.md).
 
 ### Still open
 
