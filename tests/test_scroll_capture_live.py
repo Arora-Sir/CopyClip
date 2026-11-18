@@ -18,7 +18,9 @@ sys.path.insert(0, ROOT)
 import winclip  # noqa: E402
 
 LOG_PATH = os.path.join(ROOT, "logs", "copyclip.log")
-TARGET_DEVICE = "100.64.0.12:5555"
+import device_env  # noqa: E402
+
+TARGET_DEVICE = device_env.device_address("tab")
 
 
 def get_log_offset() -> int:

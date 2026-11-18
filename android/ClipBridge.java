@@ -112,7 +112,7 @@ import org.json.JSONObject;
  * above is completely unmodified by any of this. A ContentResolver is required to write an
  * image to the clipboard (a ClipData.Item needs a real content:// URI: a file:// URI
  * throws FileUriExposedException), which under app_process needs the FakeContext trick
- * (ported from scrcpy, see bugs/SPIKE-IMAGE-CLIPBOARD.md for what was measured and the two
+ * (ported from scrcpy, see docs/bugs/SPIKE-IMAGE-CLIPBOARD.md for what was measured and the two
  * bugs found and fixed in that port). Text's setPrimaryClip/getPrimaryClip continue to go
  * through the plain reflective IClipboard binder above: FakeContext is scoped narrowly to
  * ContentResolver, never used for the clipboard service itself.
@@ -350,7 +350,7 @@ public final class ClipBridge {
     /**
      * Proves FakeContext's ContentResolver actually works on this device before any image
      * code path trusts it. Any failure here: and there is real reason to expect one on
-     * some OEM builds, see Shizuku-API's own warning quoted in bugs/SPIKE-IMAGE-CLIPBOARD.md
+     * some OEM builds, see Shizuku-API's own warning quoted in docs/bugs/SPIKE-IMAGE-CLIPBOARD.md
      *: disables imaging and falls back to text-only, exactly as if this were an older
      * ClipBridge build. Never allowed to affect connectClipboard()'s already-working state.
      */
@@ -360,7 +360,7 @@ public final class ClipBridge {
                 // ActivityThread's constructor (inside FakeContext's static init) builds a
                 // Handler, which throws unless this thread has a prepared Looper.
                 // app_process's main thread has none by default. Measured directly:
-                // bugs/SPIKE-IMAGE-CLIPBOARD.md.
+                // docs/bugs/SPIKE-IMAGE-CLIPBOARD.md.
                 Looper.prepareMainLooper();
             }
             ContentResolver resolver = FakeContext.get().getContentResolver();
@@ -597,7 +597,7 @@ public final class ClipBridge {
         // clean URL regardless: but core/policy.py's TEXT_MIMES only recognises the
         // literal strings "text/plain"/"text/html", so a perfectly good link was reported
         // under a mime the laptop had never heard of and silently rejected as non-text. See
-        // bugs/BUG-007-long-link-copy-rejected-as-non-text.md.
+        // docs/bugs/BUG-007-long-link-copy-rejected-as-non-text.md.
         if (desc.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) {
             return ClipDescription.MIMETYPE_TEXT_PLAIN;
         }
@@ -954,7 +954,7 @@ public final class ClipBridge {
      * proven reflective IClipboard-binder path above.
      *
      * Two fixes beyond a straight port, both found and measured on this project's own
-     * hardware (bugs/SPIKE-IMAGE-CLIPBOARD.md), neither of which scrcpy itself needed
+     * hardware (docs/bugs/SPIKE-IMAGE-CLIPBOARD.md), neither of which scrcpy itself needed
      * because it never does file I/O through this resolver:
      *   1. initImaging() prepares a main Looper first: ActivityThread's constructor
      *      (below, in the static initializer) builds a Handler, which throws without one.
@@ -1159,7 +1159,7 @@ public final class ClipBridge {
      * way, so a misreporting or SIZE-less provider still cannot exhaust memory.
      *
      * Returns {byte[] data, String mime}. Throws on any failure: callers must treat that
-     * as "skip this image", per bugs/SPIKE-IMAGE-CLIPBOARD.md's Q5/Q7 finding that reading
+     * as "skip this image", per docs/bugs/SPIKE-IMAGE-CLIPBOARD.md's Q5/Q7 finding that reading
      * a clip URI minted by a different app's provider is not proven to always work for the
      * shell UID.
      */
@@ -1259,7 +1259,7 @@ public final class ClipBridge {
 
     /**
      * Samsung's screenshot capture does not call setPrimaryClip(): measured directly:
-     * bugs/SCREENSHOT-SYNC-FIX.md, three real screenshots taken while this poll loop was
+     * docs/bugs/SCREENSHOT-SYNC-FIX.md, three real screenshots taken while this poll loop was
      * running produced zero clipboard events. The "clipboard panel" showing a recent
      * screenshot is a convenience suggestion list, not the actual system clipboard. So
      * there is no clip event to catch here; instead this watches the screenshot folder
@@ -1299,7 +1299,7 @@ public final class ClipBridge {
     // observed for it, so a same-filename overwrite (Samsung's scroll capture finalizes a
     // long screenshot by rewriting the SAME path with the full stitched image, seconds after
     // the initial single-page shot, measured directly on this hardware, see
-    // bugs/BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md) can still be
+    // docs/bugs/BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md) can still be
     // caught within a bounded follow-up window, instead of that filename being ignored
     // forever once first seen.
     private static long lastScreenshotFirstSyncMs = 0L;
@@ -1319,7 +1319,7 @@ public final class ClipBridge {
     // scrolling-screenshot preview-then-final pair) doesn't get pushed twice. Defense in
     // depth on top of checkScreenshots()'s filename-identity check above: that check
     // handles the *measured*, common case (same file rewritten in place by a background
-    // process: see bugs/BUG-005-duplicate-screenshot-push.md); this handles a
+    // process: see docs/bugs/BUG-005-duplicate-screenshot-push.md); this handles a
     // same-content-different-filename case that check structurally can't catch. Not a
     // substitute for suppressHash below: that's a single slot for the device's own most
     // recent *clipboard* write and is trivially clobbered by any other doSet in between.
@@ -1338,7 +1338,7 @@ public final class ClipBridge {
     }
 
     // Coordinates checkScreenshots() (the file watcher) with the ordinary clipboard-image
-    // path (emitDesc()/emitImageDesc()): see bugs/BUG-006-duplicate-screenshot-clipboard-
+    // path (emitDesc()/emitImageDesc()): see docs/bugs/BUG-006-duplicate-screenshot-clipboard-
     // preview.md. Measured on this device: taking a screenshot reliably produces the real
     // file AND, separately, a second, much smaller image on the ordinary clipboard, 0-2s
     // apart in either order: traced to a companion app's own screenshot-notification
@@ -1461,7 +1461,7 @@ public final class ClipBridge {
                 // after its first sync, since Samsung's scroll capture finalizes a long
                 // screenshot by overwriting the SAME path with the full stitched image,
                 // seconds after the initial single-page shot (measured directly, see
-                // bugs/BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md).
+                // docs/bugs/BUG-014-samsung-long-screenshot-scroll-capture-partial-sync.md).
                 // Gated on length, never on mtime alone, so BUG-005's fix (a background
                 // process re-touching identical bytes must never re-trigger a resync) still
                 // holds inside this window.
@@ -1950,7 +1950,7 @@ public final class ClipBridge {
      * reading the description straight back, because a locked device accepts
      * setPrimaryClip and discards it without raising anything: the same silent-discard
      * behaviour measured for text (NOTES.md) and re-confirmed for images
-     * (bugs/SPIKE-IMAGE-CLIPBOARD.md).
+     * (docs/bugs/SPIKE-IMAGE-CLIPBOARD.md).
      */
     private static void doSetImage(byte[] data, String mime) throws Exception {
         if (!imagingAvailable) {

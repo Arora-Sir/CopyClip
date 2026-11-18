@@ -12,6 +12,7 @@ import base64
 import hashlib
 import time
 from dataclasses import dataclass, field
+from functools import cached_property
 
 TEXT_MIMES = ("text/plain", "text/html")
 
@@ -35,7 +36,7 @@ class ClipPayload:
 
     # -- identity ----------------------------------------------------------
 
-    @property
+    @cached_property
     def sha256(self) -> str:
         """Content identity: SHA-256 of the raw bytes.
 

@@ -58,7 +58,7 @@ New-Item -ItemType Directory -Path $outDir   -Force | Out-Null
 # real interface is supplied by the boot classloader at runtime. Compiles fine against the
 # stock android.jar above; no patched hidden-API jar needed. See
 # otherCopyProjects/NOTES.md's corrected FakeContext section and
-# bugs/SPIKE-IMAGE-CLIPBOARD.md for what this was verified against.
+# docs/bugs/SPIKE-IMAGE-CLIPBOARD.md for what this was verified against.
 #
 # -source/-target rather than --release: --release pins the JDK platform API and
 # conflicts with compiling against android.jar. -Xlint:-options silences the

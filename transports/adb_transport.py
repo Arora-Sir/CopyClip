@@ -50,11 +50,17 @@ class AdbTransport(Transport):
     # -- helpers -----------------------------------------------------------
 
     def _adb(self, *args: str, timeout: float | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [self.adb, "-s", self.device, *args],
-            capture_output=True, text=True, timeout=timeout or self.connect_timeout,
-            creationflags=_NO_WINDOW,
-        )
+        limit = timeout or self.connect_timeout
+        try:
+            return subprocess.run(
+                [self.adb, "-s", self.device, *args],
+                capture_output=True, text=True, timeout=limit,
+                creationflags=_NO_WINDOW,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TransportError(f"adb {args[0]} on {self.device} timed out after {limit}s") from exc
+        except OSError as exc:
+            raise TransportError(f"cannot run adb ({self.adb!r}): {exc}") from exc
 
     def _ensure_connected(self) -> None:
         # `adb connect` is idempotent and cheap; it re-establishes after a Tailscale blip.
@@ -66,6 +72,8 @@ class AdbTransport(Transport):
             )
         except subprocess.TimeoutExpired as exc:
             raise TransportError(f"adb connect {self.device} timed out after {self.connect_timeout}s") from exc
+        except OSError as exc:
+            raise TransportError(f"cannot run adb ({self.adb!r}): {exc}") from exc
         blob = (res.stdout + res.stderr).lower()
         if "connected" not in blob:
             raise TransportError(
@@ -110,11 +118,14 @@ class AdbTransport(Transport):
 
         # -T disables PTY allocation. Without it adb rewrites \n as \r\n on the way out,
         # silently corrupting every multi-line clip.
-        self._proc = subprocess.Popen(
-            [self.adb, "-s", self.device, "shell", "-T", SERVE_CMD],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            bufsize=0, creationflags=_NO_WINDOW,
-        )
+        try:
+            self._proc = subprocess.Popen(
+                [self.adb, "-s", self.device, "shell", "-T", SERVE_CMD],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                bufsize=0, creationflags=_NO_WINDOW,
+            )
+        except OSError as exc:
+            raise TransportError(f"cannot start adb shell: {exc}") from exc
 
         self._reader = threading.Thread(target=self._read_loop, name="copyclip-adb-reader",
                                         daemon=True)

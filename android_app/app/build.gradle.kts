@@ -12,7 +12,7 @@ android {
         applicationId = "com.mohitarora.copyclip"
         minSdk = 26
         targetSdk = 36
-        // 0.x: this is the Shizuku-AIDL spike milestone (see bugs/SPIKE-ANDROID-USERSERVICE.md),
+        // 0.x: this is the Shizuku-AIDL spike milestone (see docs/bugs/SPIKE-ANDROID-USERSERVICE.md),
         // not yet the full ClipBridge-logic port described in ARCHITECTURE.md.
         versionCode = 1
         versionName = "0.1.0-spike"

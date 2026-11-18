@@ -154,7 +154,7 @@ _MIME_REGISTERED = {v: k for k, v in _REGISTERED_MIME.items()}
 # Set alongside an image in write_image() (DWORD 0) to tell Windows' Clipboard History
 # service to skip that item entirely: a large device-synced screenshot was observed
 # evicting the user's existing History entries (see ARCHITECTURE.md's "Two entries in
-# Windows Clipboard History" note and bugs/BUG-005's Open points for the full
+# Windows Clipboard History" note and docs/bugs/BUG-005's Open points for the full
 # investigation); this trades away that one image's own History visibility (Ctrl+V still
 # pastes it correctly: this only affects History's bookkeeping, never the live clipboard)
 # in exchange for not disturbing the rest of the user's history.
@@ -403,7 +403,7 @@ def write_image(data: bytes, mime: str, attempts: int = 4, *,
     so this image doesn't show up in (or evict entries from) Windows Clipboard History.
     Ctrl+V always pastes it normally either way; the flag only affects History's own
     bookkeeping. See config.json's `screenshot_exclude_from_history` and
-    bugs/BUG-005-duplicate-screenshot-push.md's Open points for why this exists.
+    docs/bugs/BUG-005-duplicate-screenshot-push.md's Open points for why this exists.
 
     Raises winimage.ImageDecodeError if `data` cannot be decoded (corrupt bytes, or a
     format WIC has no codec for): callers must treat that as a failed write, not crash.

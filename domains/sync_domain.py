@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from nodes.base import ClipboardNode
+from core.interfaces import ClipboardNode
 
 log = logging.getLogger("copyclip.domain")
 

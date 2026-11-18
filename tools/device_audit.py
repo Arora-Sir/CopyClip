@@ -1,4 +1,4 @@
-r"""Read-only audit of both Samsung devices, written to bugs/DEVICE-STATE.md.
+r"""Read-only audit of both Samsung devices, written to docs/bugs/DEVICE-STATE.md.
 
 Purpose: make device state a *diff against a known baseline* rather than something we
 re-derive from memory every time something misbehaves. Every value here was worth knowing
@@ -7,7 +7,7 @@ during the toast-storm investigation, so it is captured permanently.
 Strictly read-only. It runs `getprop`, `settings get`, `appops get`, `pm` and `dumpsys`,
 and changes nothing.
 
-    python tools\device_audit.py            # rewrite bugs/DEVICE-STATE.md
+    python tools\device_audit.py            # rewrite docs/bugs/DEVICE-STATE.md
     python tools\device_audit.py --print    # print, do not write
 """
 

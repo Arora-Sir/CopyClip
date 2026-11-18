@@ -72,9 +72,15 @@ class _InboundTransfer:
     started_at: float = field(default_factory=time.time)
     last_chunk_at: float = field(default_factory=time.time)
     chunks: list = field(default_factory=list)
+    received_chars: int = 0
 
 
 class AndroidNode(ClipboardNode):
+    # Minimum waits for chunked image writes, whatever ack_timeout_s says. Class attributes
+    # so tests can shrink them; production behaviour is unchanged.
+    chunk_ack_floor_s = 30.0
+    final_ack_floor_s = 60.0
+
     def __init__(self, name: str, transport_factory: TransportFactory, *,
                  reconnect_min_s: float = 1.0, reconnect_max_s: float = 30.0,
                  idle_ping_s: float = 60.0, ack_timeout_s: float = 4.0,
@@ -282,6 +288,12 @@ class AndroidNode(ClipboardNode):
         self.sensitive_wipe_s = float(wipe_s)
         self._send_conf()
 
+    def set_max_image_bytes(self, limit: int) -> None:
+        self.max_image_bytes = int(limit)
+
+    def set_ack_timeout_s(self, seconds: float) -> None:
+        self.ack_timeout_s = float(seconds)
+
     def set_camera_backup(self, enable: bool) -> None:
         """Update camera_backup setting and resend CONF to live ClipBridge."""
         self.camera_backup = bool(enable)
@@ -366,11 +378,16 @@ class AndroidNode(ClipboardNode):
             if len(parts) < 7:
                 log.warning("[%s] malformed CLIPB", self.name)
                 return
-            _, transfer_id, mime, sensitive, sha, size_s, nchunks_s = parts
+            _, transfer_id, mime, sensitive, sha, size_s, nchunks_s = parts[:7]  # extras ignored
             try:
                 size, nchunks = int(size_s), int(nchunks_s)
             except ValueError:
                 log.warning("[%s] unparseable CLIPB: %s", self.name, line[:80])
+                return
+            if size < 1 or nchunks < 1:
+                log.warning("[%s] CLIPB %s rejected: size=%d nchunks=%d must be positive",
+                            self.name, transfer_id, size, nchunks)
+                self._inbound_transfer = None
                 return
             if size > self.max_image_bytes:
                 log.warning("[%s] CLIPB %s rejected before buffering: %d bytes > cap %d",
@@ -404,6 +421,13 @@ class AndroidNode(ClipboardNode):
             if idx != len(t.chunks):
                 log.warning("[%s] CLIPC gap in %s: expected chunk %d, got %d; aborting",
                             self.name, transfer_id, len(t.chunks), idx)
+                self._inbound_transfer = None
+                return
+            t.received_chars += len(chunk_b64)
+            if t.received_chars > ((t.total_bytes + 2) // 3) * 4 + 8:
+                # More data than the header promised: abort instead of buffering without bound.
+                log.warning("[%s] CLIPC overflow in %s (%d chars for %d declared bytes); aborting",
+                            self.name, transfer_id, t.received_chars, t.total_bytes)
                 self._inbound_transfer = None
                 return
             t.chunks.append(chunk_b64)
@@ -647,6 +671,7 @@ class AndroidNode(ClipboardNode):
 
         t0 = time.time()
         self._ack_event.clear()
+        self._chunk_ack_event.clear()  # a leftover ACK from a previous transfer must not count
         self._ack_verb = "set"
         try:
             transport.send_line(
@@ -658,7 +683,7 @@ class AndroidNode(ClipboardNode):
                 # the whole (pointless) transfer finished sending, instead of within
                 # ack_timeout_s like every other write.
                 if idx > 0 and idx % ACK_WINDOW == 0:
-                    chunk_timeout = max(self.ack_timeout_s, 30.0)
+                    chunk_timeout = max(self.ack_timeout_s, self.chunk_ack_floor_s)
                     if not self._chunk_ack_event.wait(timeout=chunk_timeout):
                         log.warning(
                             "[%s] no chunk ACK within %.1fs at chunk %d/%d; "
@@ -674,7 +699,7 @@ class AndroidNode(ClipboardNode):
             self._ack_verb = None
             return WriteResult.FAILED
 
-        final_timeout = max(self.ack_timeout_s, 60.0)
+        final_timeout = max(self.ack_timeout_s, self.final_ack_floor_s)
         confirmed = self._ack_event.wait(timeout=final_timeout)
         self._ack_verb = None
         duration = time.time() - t0

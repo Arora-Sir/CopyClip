@@ -22,29 +22,54 @@ import logging
 import threading
 import time
 
-from domains.sync_domain import SyncDomain
-from nodes.base import ClipboardNode
+from typing import TYPE_CHECKING
 
+from .interfaces import ClipboardNode
+
+if TYPE_CHECKING:   # annotations only: core never imports the domains package at runtime
+    from domains.sync_domain import SyncDomain
+
+from .activity import ActivityLog
 from .baseline_store import BaselineStore
 from .dedup import RecentClips
 from .models import ClipDescriptor, ClipPayload, WriteResult
 from .outbox import Outbox
+from .imagemeta import dimensions as image_dimensions, has_exif
 from .policy import Policy
 
 log = logging.getLogger("copyclip.hub")
 
 
+#: Seconds an image must stay unchanged before announcing it again counts as a re-copy.
+IMAGE_RECOPY_GUARD_S = 15.0
+#: A second image of the same size from the same device within this window, whose size differs by
+#: under this fraction, is a re-save of the first.
+RESAVE_WINDOW_S = 4.0
+RESAVE_SIZE_TOLERANCE = 0.02
+#: Samsung puts a small preview of a screenshot on the clipboard around the time the real one lands.
+#: Images under this size wait PREVIEW_HOLD_S for a larger picture of the same shape from the same device.
+PREVIEW_MAX_BYTES = 60_000
+PREVIEW_HOLD_S = 2.5
+PREVIEW_LOOKBACK_S = 6.0
+
 class Hub:
     def __init__(self, *, nodes: list[ClipboardNode], domains: list[SyncDomain],
                  policy: Policy, outbox: Outbox, dedup: RecentClips | None = None,
                  baseline_store: BaselineStore | None = None,
-                 tick_s: float = 2.0, adopt_on_connect: bool = False,
+                 tick_s: float = 2.0, adopt_on_connect: bool = False, filter_previews: bool = True,
                  direct_password_sync: bool = False,
-                 allow_recopy: bool = True) -> None:
+                 allow_recopy: bool = True,
+                 activity: ActivityLog | None = None) -> None:
         self.nodes = {n.name: n for n in nodes}
         self.domains = domains
         self.policy = policy
         self.outbox = outbox
+        self._recent_images: dict[str, tuple] = {}
+        self._pending_previews: dict[str, tuple] = {}
+        self._preview_notes: dict[str, str] = {}
+        self._preview_lock = threading.Lock()
+        self.preview_hold_s = PREVIEW_HOLD_S
+        self.filter_previews = filter_previews
         self.dedup = dedup or RecentClips()
         self.baseline_store = baseline_store
         self.tick_s = tick_s
@@ -64,6 +89,11 @@ class Hub:
         self._last_stamp_node: str | None = None
         self._last_stamp_time: float = 0.0
         self.stats = {"observed": 0, "delivered": 0, "skipped": 0, "queued": 0}
+        self.activity = activity if activity is not None else ActivityLog()
+        self.started_at = time.time()
+        self._node_last_clip: dict[str, float] = {}
+        # Per-route delivery trace for the activity log. Only touched under _route_lock.
+        self._trace: list[dict] | None = None
 
     def pause_device(self, name: str) -> None:
         self.paused_devices.add(name)
@@ -76,16 +106,38 @@ class Hub:
     def is_device_paused(self, name: str) -> bool:
         return self.paused or (name in self.paused_devices)
 
-    def reload_config(self, cfg: dict) -> None:
-        """Dynamically hot-reloads runtime policies, screenshot paths, and node configs."""
-        if hasattr(self.policy, "allow_images"):
-            self.policy.allow_images = bool(cfg.get("allow_images", True))
-        if hasattr(self.policy, "max_chars"):
-            self.policy.max_chars = int(cfg.get("max_chars", 800000))
-        if hasattr(self.policy, "max_image_bytes"):
-            self.policy.max_image_bytes = int(cfg.get("max_image_bytes", 25165824))
-        if hasattr(self.policy, "allow_sensitive"):
-            new_allow_sensitive = bool(cfg.get("allow_sensitive", False))
+    def reload_config(self, cfg: dict) -> list[str]:
+        """Hot-apply every reloadable key that is present in `cfg`; returns the keys applied.
+
+        A key that is absent is left exactly as it is. Startup defaults live in
+        core/config.py, so a partial dict can never silently flip a setting.
+        """
+        applied: list[str] = []
+
+        def has(*keys: str) -> bool:
+            present = [k for k in keys if k in cfg]
+            applied.extend(present)
+            return bool(present)
+
+        if has("allow_images"):
+            self.policy.allow_images = bool(cfg["allow_images"])
+        if has("max_chars"):
+            self.policy.max_chars = int(cfg["max_chars"])
+        if has("allow_non_text"):
+            self.policy.allow_non_text = bool(cfg["allow_non_text"])
+        if has("denylist_regex"):
+            self.policy.set_denylist(cfg["denylist_regex"])
+        if has("max_image_bytes"):
+            self.policy.max_image_bytes = int(cfg["max_image_bytes"])
+            for node in self.nodes.values():
+                if hasattr(node, "set_max_image_bytes"):
+                    node.set_max_image_bytes(self.policy.max_image_bytes)
+        if has("ack_timeout_s"):
+            for node in self.nodes.values():
+                if hasattr(node, "set_ack_timeout_s"):
+                    node.set_ack_timeout_s(float(cfg["ack_timeout_s"]))
+        if has("allow_sensitive"):
+            new_allow_sensitive = bool(cfg["allow_sensitive"])
             if not new_allow_sensitive and self.policy.allow_sensitive:
                 self.outbox.drop_sensitive()
             self.policy.allow_sensitive = new_allow_sensitive
@@ -93,40 +145,80 @@ class Hub:
                 if hasattr(node, "set_allow_sensitive"):
                     node.set_allow_sensitive(new_allow_sensitive)
 
-        wipe_s = cfg.get("sensitive_wipe_s")
+        wipe_s = float(cfg["sensitive_wipe_s"]) if has("sensitive_wipe_s") else None
         if wipe_s is not None:
-            wipe_s_float = float(wipe_s)
             for node in self.nodes.values():
                 if hasattr(node, "set_sensitive_wipe_s"):
-                    node.set_sensitive_wipe_s(wipe_s_float)
+                    node.set_sensitive_wipe_s(wipe_s)
 
-        if "direct_password_sync" in cfg:
-            self.direct_password_sync = bool(cfg.get("direct_password_sync", False))
+        if has("direct_password_sync"):
+            self.direct_password_sync = bool(cfg["direct_password_sync"])
+        if has("allow_recopy"):
+            self.allow_recopy = bool(cfg["allow_recopy"])
+        if has("adopt_on_connect"):
+            self.adopt_on_connect = bool(cfg["adopt_on_connect"])
+        if has("filter_screenshot_previews"):
+            self.filter_previews = bool(cfg["filter_screenshot_previews"])
 
-        if "allow_recopy" in cfg:
-            self.allow_recopy = bool(cfg.get("allow_recopy", True))
-
-        camera_backup = bool(cfg.get("camera_backup", True))
-        camera_backup_dir = cfg.get("camera_backup_dir") or None
-        for node in self.nodes.values():
-            if hasattr(node, "set_camera_backup"):
-                node.set_camera_backup(camera_backup)
+        camera_backup = bool(cfg["camera_backup"]) if has("camera_backup") else None
+        if camera_backup is not None:
+            for node in self.nodes.values():
+                if hasattr(node, "set_camera_backup"):
+                    node.set_camera_backup(camera_backup)
 
         laptop_node = self.nodes.get("laptop")
-        if laptop_node is not None and hasattr(laptop_node, "update_config"):
-            laptop_node.update_config(
-                screenshot_dir=cfg.get("screenshot_backup_dir") or None,
-                screenshot_include_devices=cfg.get("screenshot_backup_include_devices", True),
-                screenshot_device_subfolders=cfg.get("screenshot_device_subfolders", False),
-                device_screenshot_paths=cfg.get("device_screenshot_paths", {}),
-                exclude_synced_images_from_history=cfg.get("screenshot_exclude_from_history", True),
-                sensitive_wipe_s=float(wipe_s) if wipe_s is not None else None,
-                direct_password_sync=self.direct_password_sync,
-                camera_backup=camera_backup,
-                camera_backup_dir=camera_backup_dir,
-                camera_device_subfolders=cfg.get("camera_device_subfolders", False),
-            )
-        log.info("hub configuration hot-reloaded dynamically")
+        storage_keys = ("screenshot_backup_dir", "screenshot_backup_include_devices",
+                        "screenshot_device_subfolders", "device_screenshot_paths",
+                        "screenshot_exclude_from_history", "camera_backup_dir",
+                        "camera_device_subfolders")
+        if laptop_node is not None and hasattr(laptop_node, "update_config") and has(*storage_keys):
+            laptop_node.update_config(**self._storage_kwargs(cfg, wipe_s, camera_backup))
+        elif laptop_node is not None and hasattr(laptop_node, "update_config") and (
+                wipe_s is not None or camera_backup is not None
+                or "direct_password_sync" in cfg):
+            laptop_node.update_config(**self._storage_kwargs(cfg, wipe_s, camera_backup))
+        log.info("hub configuration hot-reloaded (%d keys)", len(applied))
+        return applied
+
+    def _storage_kwargs(self, cfg: dict, wipe_s, camera_backup) -> dict:
+        laptop = self.nodes["laptop"]
+        kwargs = dict(
+            screenshot_dir=(cfg["screenshot_backup_dir"] or None)
+            if "screenshot_backup_dir" in cfg else getattr(laptop, "_screenshot_dir", None),
+            screenshot_include_devices=cfg.get(
+                "screenshot_backup_include_devices",
+                getattr(laptop, "_screenshot_include_devices", True)),
+            screenshot_device_subfolders=cfg.get(
+                "screenshot_device_subfolders",
+                getattr(laptop, "_screenshot_device_subfolders", True)),
+            device_screenshot_paths=cfg.get(
+                "device_screenshot_paths", getattr(laptop, "_device_screenshot_paths", {})),
+            exclude_synced_images_from_history=cfg.get(
+                "screenshot_exclude_from_history",
+                getattr(laptop, "_exclude_synced_images_from_history", True)),
+            sensitive_wipe_s=wipe_s,
+            direct_password_sync=self.direct_password_sync,
+            camera_backup=camera_backup,
+            camera_device_subfolders=cfg.get("camera_device_subfolders"),
+        )
+        if "camera_backup_dir" in cfg:
+            kwargs["camera_backup_dir"] = cfg["camera_backup_dir"] or ""  # "" clears the override
+        return kwargs
+
+    def apply_key(self, key_hex: str) -> list[str]:
+        """Give every connected device a new shared key; returns the names updated.
+
+        Devices that are offline pick the key up from the CONF line sent on reconnect.
+        """
+        updated: list[str] = []
+        for node in self.nodes.values():
+            if hasattr(node, "send_conf"):
+                node.send_conf(key_hex, getattr(node, "hub_host", ""),
+                               getattr(node, "push_port", 8387),
+                               getattr(node, "device_name", node.name))
+                if node.available:
+                    updated.append(node.name)
+        return updated
 
     #: topology ----------------------------------------------------------
 
@@ -199,7 +291,10 @@ class Hub:
                 d.note_observed(desc.sha256, desc.node)
 
             if known:
-                if self.allow_recopy and self.dedup.is_recopy(desc.sha256, desc.node):
+                # Images use a long guard: a device echoing the same image right after we read it
+                # (Samsung bumps the clip stamp) is not a person copying it again.
+                if self.allow_recopy and self.dedup.is_recopy(
+                        desc.sha256, desc.node, min_interval_s=IMAGE_RECOPY_GUARD_S if desc.is_image else 0.3):
                     log.info("[%s] re-copied %s; re-fetching body to update clipboard",
                              desc.node, desc.short)
                     self.dedup.prepare_for_redelivery(desc.sha256, desc.node)
@@ -212,6 +307,9 @@ class Hub:
             if desc.sensitive and not self.policy.allow_sensitive:
                 self.stats["skipped"] += 1
                 log.info("skip clip from %s: flagged sensitive by the source app", desc.node)
+                self.activity.record(kind="text", size=desc.char_len, origin=desc.node,
+                                     status="skipped", sensitive=True,
+                                     reason="flagged sensitive; sensitive sync is off")
                 return
 
             size_cap = self.policy.max_image_bytes if desc.is_image else self.policy.max_chars
@@ -220,6 +318,9 @@ class Hub:
                 self.stats["skipped"] += 1
                 log.info("skip clip from %s: too large (%d > %d), body not fetched",
                          desc.node, desc.char_len, size_cap)
+                self.activity.record(kind="image" if desc.is_image else "text",
+                                     size=desc.char_len, origin=desc.node, status="skipped",
+                                     reason=f"too large ({desc.char_len} > {size_cap})")
                 return
 
             node = self.nodes.get(desc.node)
@@ -229,10 +330,14 @@ class Hub:
                       desc.node, desc.short, desc.char_len)
             node.request_refresh()
 
-    def on_clip(self, payload: ClipPayload) -> None:
+    def on_clip(self, payload: ClipPayload, *, _released: bool = False) -> None:
         """A clip was observed on payload.origin."""
         if self.paused or (payload.origin in self.paused_devices):
             log.debug("sync paused for %s; ignoring clip", payload.origin)
+            return
+
+        if (self.filter_previews and payload.is_image and not payload.is_camera and not _released
+                and self._preview_gate(payload)):
             return
 
         if payload.is_camera:
@@ -240,13 +345,16 @@ class Hub:
             if laptop is not None:
                 res = laptop.write(payload)
                 log.info("[%s] camera photo delivered to laptop: %s", payload.origin, res)
+                self._record(payload, [{"node": "laptop", "status": self._trace_status(res)}],
+                             reason="camera photo backup")
             return
 
         with self._route_lock:
             sha = payload.sha256
             source = payload.origin
 
-            if self.allow_recopy and self.dedup.is_recopy(sha, source):
+            if self.allow_recopy and self.dedup.is_recopy(
+                    sha, source, min_interval_s=IMAGE_RECOPY_GUARD_S if payload.is_image else 0.3):
                 log.info("[%s] local re-copy of %s; refreshing mesh", source, payload.short)
                 self.dedup.prepare_for_redelivery(sha, source)
 
@@ -287,6 +395,14 @@ class Hub:
                               "(%d chars); syncing it now instead of dropping it as a "
                               "baseline", source, payload.char_len)
 
+            if payload.is_image and self._is_resaved_image(payload):
+                self.stats["skipped"] += 1
+                log.info("[%s] skipped %s: same picture as the one just received, re-saved by the device",
+                         source, payload.short)
+                self._record(payload, [], status="skipped",
+                             reason="same screenshot re-saved by the device a moment later")
+                return
+
             if is_new:
                 self.stats["observed"] += 1
             else:
@@ -301,6 +417,7 @@ class Hub:
             if reason:
                 self.stats["skipped"] += 1
                 log.info("skip clip from %s: %s", source, reason)
+                self._record(payload, [], status="skipped", reason=reason)
                 return
 
             now = time.time()
@@ -313,7 +430,151 @@ class Hub:
             else:
                 origin_display = source
 
-            self._route(payload, source_domain=domain, origin_display=origin_display)
+            self._trace = []
+            try:
+                self._route(payload, source_domain=domain, origin_display=origin_display)
+            finally:
+                trace, self._trace = self._trace, None
+            self._node_last_clip[source] = time.time()
+            wipe = getattr(self.nodes.get("laptop"), "sensitive_wipe_s", None)
+            note = (f"clears itself after {wipe:g} s"
+                    if payload.sensitive and not self.direct_password_sync and wipe else "")
+            self._record(payload, trace, reason=note)
+
+    def _trace_status(self, result: str) -> str:
+        return {WriteResult.OK: "delivered", WriteResult.DEFERRED: "deferred",
+                WriteResult.UNAVAILABLE: "queued", WriteResult.FAILED: "queued",
+                WriteResult.REJECTED: "rejected"}.get(result, "queued")
+
+    @staticmethod
+    def _same_shape(a, b) -> bool:
+        """True when two (width, height) pairs have the same aspect ratio within 2 percent."""
+        if not a or not b:
+            return False
+        ra, rb = a[0] / a[1], b[0] / b[1]
+        return abs(ra - rb) <= 0.02 * max(ra, rb)
+
+    def _preview_gate(self, payload: ClipPayload) -> bool:
+        """Keep the small preview of a screenshot from being synced as a clip of its own.
+
+        Returns True when this payload was dropped or is being held. A preview that arrives first
+        waits a moment and is dropped if the full picture follows. One that arrives after the full
+        picture is dropped at once. Anything else goes through unchanged."""
+        dims = image_dimensions(payload.data)
+        size = len(payload.data)
+        origin = payload.origin
+        now = time.time()
+        area = dims[0] * dims[1] if dims else 0
+        with self._preview_lock:
+            held = self._pending_previews.get(origin)
+            if held is not None:
+                held_payload, held_dims, timer = held
+                if dims and size > len(held_payload.data) * 2 and self._same_shape(dims, held_dims)                         and area >= 2 * held_dims[0] * held_dims[1]:
+                    timer.cancel()
+                    del self._pending_previews[origin]
+                    self.stats["skipped"] += 1
+                    log.info("[%s] dropped the preview %s: the full screenshot followed",
+                             origin, held_payload.short)
+                    self._preview_notes[origin] = "ignored the small preview Samsung adds"
+                    return False
+                timer.cancel()
+                del self._pending_previews[origin]
+                release_now = held_payload
+            else:
+                release_now = None
+            late = self._recent_images.get(origin)
+            if (release_now is None and dims and size < PREVIEW_MAX_BYTES and late is not None
+                    and late[0] and now - late[2] <= PREVIEW_LOOKBACK_S and self._same_shape(dims, late[0])
+                    and late[0][0] * late[0][1] >= 2 * area and late[1] > size * 2):
+                self.stats["skipped"] += 1
+                log.info("[%s] dropped the preview %s: it followed the full screenshot", origin, payload.short)
+                self.activity.annotate_last_image(origin, "ignored the small preview Samsung adds")
+                return True
+            hold = bool(dims) and size < PREVIEW_MAX_BYTES
+            if hold:
+                timer = threading.Timer(self.preview_hold_s, self._release_preview, args=(origin,))
+                timer.daemon = True
+                self._pending_previews[origin] = (payload, dims, timer)
+                timer.start()
+        if release_now is not None:
+            self.on_clip(release_now, _released=True)
+        return hold
+
+    def _release_preview(self, origin: str) -> None:
+        with self._preview_lock:
+            held = self._pending_previews.pop(origin, None)
+        if held is not None:
+            self.on_clip(held[0], _released=True)
+
+    def _is_resaved_image(self, payload: ClipPayload) -> bool:
+        """Samsung sometimes saves one screenshot twice a second apart with a different JPEG encoding,
+        so the hashes differ but the picture is the same. Same device, same pixel size, almost the
+        same byte size, within a few seconds, means the second one is that re-save."""
+        dims = image_dimensions(payload.data)
+        now = time.time()
+        size = len(payload.data)
+        last = self._recent_images.get(payload.origin)
+        exif = has_exif(payload.data)
+        if last is None or dims is None:
+            self._recent_images[payload.origin] = (dims, size, now, payload.sha256, exif)
+            return False
+        l_dims, l_size, l_ts, l_sha, l_exif = last
+        twin = (l_dims == dims and l_sha != payload.sha256 and now - l_ts <= RESAVE_WINDOW_S
+                and abs(size - l_size) <= RESAVE_SIZE_TOLERANCE * max(size, l_size))
+        if not twin:
+            self._recent_images[payload.origin] = (dims, size, now, payload.sha256, exif)
+            return False
+        # The clipboard copy has no capture metadata, the file saved on the device does. Pixels are
+        # the same, so keep the original file on disk in place of the stripped first copy.
+        if exif and not l_exif:
+            laptop = self.nodes.get("laptop")
+            upgrade = getattr(laptop, "replace_last_screenshot", None)
+            if upgrade is not None:
+                try:
+                    upgrade(payload)
+                except Exception:
+                    log.exception("could not swap in the original screenshot file")
+            self._recent_images[payload.origin] = (dims, size, l_ts, payload.sha256, True)
+        return True
+
+    def _with_mirrored(self, trace: list[dict]) -> list[dict]:
+        """Samsung Continuity copies a clip between the members of a sync group on its own, so a
+        delivery to the representative also reaches its group mates. Show them, labelled as mirrored."""
+        out = list(trace)
+        seen = {t["node"] for t in out}
+        for t in trace:
+            if t["status"] not in ("delivered", "deferred"):
+                continue
+            for domain in getattr(self, "domains", []):
+                if not domain.contains(t["node"]):
+                    continue
+                for m in domain.members:
+                    if m.name not in seen and not self.is_device_paused(m.name):
+                        out.append({"node": m.name, "status": "mirrored"})
+                        seen.add(m.name)
+        return out
+
+    def _record(self, payload: ClipPayload, trace: list[dict], *, status: str | None = None,
+                reason: str = "") -> None:
+        try:
+            trace = self._with_mirrored(trace)
+            if not trace and status is None:
+                # Nothing was left to send: every device already had this clip (a restart or a repeat copy).
+                status, reason = "insync", reason or "already on every device"
+            kind = "camera" if payload.is_camera else "image" if payload.is_image else "text"
+            if kind == "image":
+                note = self._preview_notes.pop(payload.origin, "")
+                reason = f"{reason}. {note}" if reason and note else reason or note
+            event = self.activity.record(
+                kind=kind, size=payload.char_len if kind == "text" else payload.size,
+                origin=payload.origin, targets=trace, status=status, reason=reason,
+                latency_ms=max(0, int((time.time() - payload.ts) * 1000)),
+                fingerprint=payload.short, sensitive=payload.sensitive, text=payload.text)
+            lookup = getattr(self.nodes.get("laptop"), "saved_path", None)
+            if kind == "image" and not payload.sensitive and lookup is not None:
+                event.file = lookup(payload.sha256)
+        except Exception:
+            log.exception("activity record failed")  # never let diagnostics break routing
 
     #: outbound ----------------------------------------------------------
 
@@ -380,6 +641,8 @@ class Hub:
                          queue_on_failure: bool = True) -> bool:
         if self.is_device_paused(node.name):
             log.debug("skipping delivery to %s; device is paused", node.name)
+            if self._trace is not None:
+                self._trace.append({"node": node.name, "status": "paused"})
             return True
         sha = payload.sha256
         display = origin_display or payload.origin
@@ -394,6 +657,8 @@ class Hub:
             return True
 
         result = node.write(payload)
+        if self._trace is not None:
+            self._trace.append({"node": node.name, "status": self._trace_status(result)})
 
         if result in (WriteResult.OK, WriteResult.DEFERRED):
             # Mark delivered on DEFERRED too: ClipBridge has taken custody and replays on
@@ -449,6 +714,9 @@ class Hub:
                     node = self.nodes.get(ident)
                     if node is None or not node.available:
                         continue
+                    if self.is_device_paused(ident):
+                        # Keep the queued clip for resume; clearing it here lost it silently.
+                        continue
                     if self._deliver_to_node(node, payload):
                         self.outbox.clear(key)
 
@@ -496,7 +764,10 @@ class Hub:
                 "available": n.available,
                 "locked": n.locked,
                 "paused": self.is_device_paused(n.name),
+                "last_error": getattr(n, "last_error", None),
+                "last_clip_ts": self._node_last_clip.get(n.name),
             } for n in self.nodes.values()},
+            "uptime_s": int(time.time() - self.started_at),
             "domains": [d.status() for d in self.domains],
             "outbox": self.outbox.keys(),
             "stats": dict(self.stats),

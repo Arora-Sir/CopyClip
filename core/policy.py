@@ -26,6 +26,10 @@ class Policy:
         self.allow_images = allow_images
         self.max_image_bytes = max_image_bytes
 
+    def set_denylist(self, patterns: list[str]) -> None:
+        """Replace the denylist atomically; an invalid pattern leaves the old list in place."""
+        self.denylist = [re.compile(p) for p in (patterns or [])]
+
     def reject_reason(self, payload: ClipPayload) -> str | None:
         """None means allowed."""
         if payload.size == 0:

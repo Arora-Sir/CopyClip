@@ -1,0 +1,68 @@
+{
+  "_readme": "Copy this file to config.json and edit it. config.json is git-ignored because it holds your own device addresses and folders. Anything not listed here uses the default shown. Most settings change live from the CopyClip window; devices and ports need a restart.",
+  "devices": [
+    {
+      "name": "phone",
+      "label": "My phone",
+      "transport": "adb",
+      "device": "100.64.0.11:5555",
+      "enabled": true
+    },
+    {
+      "name": "tab",
+      "label": "My tablet",
+      "transport": "adb",
+      "device": "100.64.0.12:5555",
+      "enabled": true
+    }
+  ],
+  "_domains": "Devices that already mirror each other (Samsung Continuity). CopyClip writes to one member and lets the system distribute it. Delete this list if you have no such devices.",
+  "domains": [
+    {
+      "name": "samsung",
+      "members": [
+        "phone",
+        "tab"
+      ],
+      "grace_s": 8.0,
+      "fail_threshold": 3
+    }
+  ],
+  "_hub_ip": "This PC's Tailscale address as seen by your devices. Leave empty to detect it automatically.",
+  "hub_ip": "",
+  "_screenshot_backup_dir": "Where synced screenshots are saved. Empty turns saving off.",
+  "screenshot_backup_dir": "C:\\Users\\you\\Pictures\\Screenshots\\CopyClip",
+  "adb": "adb",
+  "dex": "bin/clipbridge.dex",
+  "key_file": "copyclip.key",
+  "state_dir": "state",
+  "max_chars": 800000,
+  "denylist_regex": [],
+  "allow_non_text": false,
+  "allow_images": false,
+  "max_image_bytes": 62914560,
+  "image_chunk_bytes": 49152,
+  "allow_sensitive": false,
+  "sensitive_wipe_s": 10.0,
+  "direct_password_sync": false,
+  "screenshot_backup_include_devices": true,
+  "screenshot_device_subfolders": true,
+  "device_screenshot_paths": {},
+  "screenshot_exclude_from_history": true,
+  "camera_backup": true,
+  "camera_backup_dir": "",
+  "camera_device_subfolders": false,
+  "allow_recopy": true,
+  "adopt_on_connect": false,
+  "filter_screenshot_previews": true,
+  "push_port": 8387,
+  "dedup_ttl_s": 90.0,
+  "reconnect_min_s": 1.0,
+  "reconnect_max_s": 30.0,
+  "idle_ping_s": 60.0,
+  "ack_timeout_s": 4.0,
+  "log_level": "INFO",
+  "autostart": true,
+  "activity_previews": true,
+  "tray_left_click": "window"
+}

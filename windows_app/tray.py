@@ -21,9 +21,13 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import logging
 import os
+import subprocess
 import sys
+import threading
+import time
 from ctypes import wintypes
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,7 +35,11 @@ sys.path.insert(0, HERE)
 
 import winclip  # noqa: E402
 from copyclip import build_hub, build_push_listener, load_config, setup_logging  # noqa: E402
+from core import config as cfgmod  # noqa: E402
 from core.single_instance import AlreadyRunning, SingleInstance  # noqa: E402
+from windows_app import launcher  # noqa: E402
+from windows_app.control_api import ControlServer  # noqa: E402
+from windows_app.service import ControlService  # noqa: E402
 
 try:
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("me.mohit.copyclip")
@@ -70,6 +78,7 @@ MF_STRING, MF_GRAYED, MF_SEPARATOR, MF_POPUP = 0x0, 0x1, 0x800, 0x0010
 TPM_RIGHTBUTTON = 0x0002
 
 IDM_PAUSE, IDM_CONFIG, IDM_LOGS, IDM_QUIT, IDM_DASHBOARD = 1001, 1002, 1003, 1004, 1005
+IDM_PAUSE_15, IDM_PAUSE_60, IDM_SEND, IDM_SHOTS = 1006, 1007, 1008, 1009
 IDM_DEVICE_BASE = 2000  # informational device-status labels start here
 IDM_DEVICE_PAUSE_BASE = 3000  # per-device pause/resume actions start here
 
@@ -158,9 +167,14 @@ def _enable_dark_mode(hwnd: int) -> None:
 
 
 class TrayApp:
-    def __init__(self, hub, cfg: dict) -> None:
+    def __init__(self, hub, cfg: dict, service: ControlService, server: ControlServer | None,
+                 legacy_ui: bool = False) -> None:
         self.hub = hub
         self.cfg = cfg
+        self.service = service
+        self.server = server
+        self.legacy_ui = legacy_ui
+        self._last_click = -10.0   # monotonic time of the last accepted tray click
         self._hwnd = None
         self._wndproc_ref = None  # must outlive the window, same rule as winclip.py's watcher
         self._nid = NOTIFYICONDATAW()
@@ -238,10 +252,16 @@ class TrayApp:
 
     def _show_menu(self) -> None:
         menu = user32.CreatePopupMenu()
-        user32.AppendMenuW(menu, MF_STRING, IDM_DASHBOARD, "Open dashboard")
+        user32.AppendMenuW(menu, MF_STRING, IDM_DASHBOARD, "Open CopyClip")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-        pause_label = "Resume sync" if self.hub.paused else "Pause sync"
-        user32.AppendMenuW(menu, MF_STRING, IDM_PAUSE, pause_label)
+        if self.hub.paused:
+            user32.AppendMenuW(menu, MF_STRING, IDM_PAUSE, "Resume sync")
+        else:
+            pause_menu = user32.CreatePopupMenu()
+            user32.AppendMenuW(pause_menu, MF_STRING, IDM_PAUSE_15, "For 15 minutes")
+            user32.AppendMenuW(pause_menu, MF_STRING, IDM_PAUSE_60, "For 1 hour")
+            user32.AppendMenuW(pause_menu, MF_STRING, IDM_PAUSE, "Until I resume")
+            user32.AppendMenuW(menu, MF_POPUP, pause_menu, "Pause sync")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
 
         for i, (name, s) in enumerate(self._device_status().items()):
@@ -257,7 +277,9 @@ class TrayApp:
             user32.AppendMenuW(menu, MF_POPUP, sub, f"{name}: {state}")
 
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(menu, MF_STRING, IDM_CONFIG, "Open config")
+        user32.AppendMenuW(menu, MF_STRING, IDM_SEND, "Send current clipboard to devices")
+        user32.AppendMenuW(menu, MF_STRING, IDM_SHOTS, "Open screenshots folder")
+        user32.AppendMenuW(menu, MF_STRING, IDM_CONFIG, "Settings")
         user32.AppendMenuW(menu, MF_STRING, IDM_LOGS, "View logs")
         user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
         user32.AppendMenuW(menu, MF_STRING, IDM_QUIT, "Quit")
@@ -274,31 +296,76 @@ class TrayApp:
 
     # -- commands --------------------------------------------------------------
 
+    def open_ui(self, route: str = "overview", flyout: bool = False) -> None:
+        """Show the CopyClip window. The window is a separate process, so a failure here can
+        never touch clipboard sync."""
+        try:
+            if self.legacy_ui:
+                import dashboard
+                dashboard.open_dashboard(self.hub, self.cfg, initial_tab=1 if route == "settings" else 0)
+            else:
+                if not flyout:
+                    self.service.navigate(route)   # an already-open window switches screen
+                launcher.open_ui(self.server, route, flyout=flyout)
+        except Exception:
+            log.exception("could not open the CopyClip window")
+
+    #: One physical click can reach us as both WM_LBUTTONUP and NIN_SELECT, and people click
+    #: twice when nothing seems to happen. Anything inside this window is the same click.
+    CLICK_DEBOUNCE_S = 0.6
+
+    def _on_tray_click(self) -> None:
+        now = time.monotonic()
+        if now - self._last_click < self.CLICK_DEBOUNCE_S:
+            return
+        self._last_click = now
+        try:
+            mode = cfgmod.load_config(os.path.join(HERE, "config.json"), validate_values=False)["tray_left_click"]
+        except Exception:
+            mode = "window"
+        self.open_ui(flyout=(mode == "flyout" and not self.legacy_ui))
+
+    def quit(self) -> None:
+        """Thread-safe: asks the tray window to run its normal Quit path."""
+        if self._hwnd:
+            user32.PostMessageW(self._hwnd, WM_COMMAND, IDM_QUIT, 0)
+
     def _handle_command(self, cmd: int) -> None:
+        svc = self.service
         if cmd == IDM_DASHBOARD:
-            import dashboard
-            dashboard.open_dashboard(self.hub, self.cfg)
+            self.open_ui()
         elif cmd == IDM_QUIT:
             user32.DestroyWindow(self._hwnd)
         elif cmd == IDM_PAUSE:
-            self.hub.paused = not self.hub.paused
-            log.info("sync %s from tray menu", "paused" if self.hub.paused else "resumed")
+            svc.set_paused(not self.hub.paused)
+            self._refresh_tip()
+        elif cmd in (IDM_PAUSE_15, IDM_PAUSE_60):
+            svc.set_paused(True, minutes=15 if cmd == IDM_PAUSE_15 else 60)
             self._refresh_tip()
         elif IDM_DEVICE_PAUSE_BASE <= cmd < IDM_DEVICE_PAUSE_BASE + 100:
             idx = cmd - IDM_DEVICE_PAUSE_BASE
             devices = list(self._device_status().keys())
             if idx < len(devices):
-                dev_name = devices[idx]
-                if self.hub.is_device_paused(dev_name):
-                    self.hub.resume_device(dev_name)
-                else:
-                    self.hub.pause_device(dev_name)
+                name = devices[idx]
+                svc.device_pause(name, not self.hub.is_device_paused(name))
                 self._refresh_tip()
         elif cmd == IDM_CONFIG:
-            import dashboard
-            dashboard.open_dashboard(self.hub, self.cfg, initial_tab=1)
+            self.open_ui("settings")
         elif cmd == IDM_LOGS:
-            os.startfile(os.path.join(HERE, "logs", "copyclip.log"))
+            self.open_ui("logs")
+        elif cmd == IDM_SEND:
+            threading.Thread(target=self._send_clipboard, name="copyclip-send", daemon=True).start()
+        elif cmd == IDM_SHOTS:
+            try:
+                svc.open_folder("screenshots")
+            except Exception:
+                log.exception("could not open the screenshots folder")
+
+    def _send_clipboard(self) -> None:
+        try:
+            self.service.send_clipboard()
+        except Exception as exc:
+            log.warning("send clipboard from tray failed: %s", exc)
 
     # -- window procedure --------------------------------------------------------
 
@@ -309,8 +376,10 @@ class TrayApp:
             lp = lparam & 0xFFFF
             if lp in (WM_RBUTTONUP, WM_CONTEXTMENU):
                 self._show_menu()
-            elif lp in (WM_LBUTTONUP, WM_LBUTTONDBLCLK, NIN_SELECT, NIN_KEYSELECT):
-                self._handle_command(IDM_DASHBOARD)
+            elif lp in (WM_LBUTTONUP, NIN_SELECT, NIN_KEYSELECT):
+                self._on_tray_click()
+            elif lp == WM_LBUTTONDBLCLK:
+                self.open_ui()
         elif msg == WM_TIMER:
             self._refresh_tip()
         elif msg == WM_COMMAND:
@@ -358,13 +427,48 @@ def register_autostart() -> None:
     log.info("autostart registered: %s", command)
 
 
+def unregister_autostart() -> None:
+    """Removes the HKCU Run entry. Idempotent: a missing entry is not an error."""
+    import winreg
+
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, "CopyClip")
+        log.info("autostart removed")
+    except FileNotFoundError:
+        pass
+
+
+def _write_control_file(path: str, server: ControlServer) -> None:
+    """Lets `copyclip.py --status` find the running daemon's API. Same-user readable only."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"port": server.port, "token": server.token, "pid": os.getpid()}, fh)
+
+
+def _restart_self() -> None:
+    """Start a replacement tray (which takes over from this one) and let it open the window."""
+    subprocess.Popen([_windowless_python(), os.path.abspath(__file__), "--replace", "--open-ui"],
+                     close_fds=True, cwd=HERE)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="CopyClip tray app")
     ap.add_argument("--replace", action="store_true",
                     help="stop an already-running CopyClip and take over")
+    ap.add_argument("--open-ui", action="store_true", help="open the window once started")
+    ap.add_argument("--legacy-ui", action="store_true", help="use the old Tk dashboard")
     args = ap.parse_args()
 
-    cfg = load_config(os.path.join(HERE, "config.json"))
+    config_path = os.path.join(HERE, "config.json")
+    try:
+        cfg = load_config(config_path)
+    except cfgmod.ConfigError as exc:
+        # No console under pythonw, so say it where the user will look.
+        message = "config.json has problems:\n  - " + "\n  - ".join(exc.problems)
+        ctypes.windll.user32.MessageBoxW(None, message, "CopyClip cannot start", 0x10)
+        return 2
     setup_logging(cfg["log_level"])
 
     # Same guard copyclip.py's own main() uses (BUG-003): refuse to run twice rather than
@@ -376,12 +480,20 @@ def main() -> int:
         log.debug("CopyClip instance is already active; yielding cleanly.")
         return 0
 
+    from core.logsetup import install_crash_diagnostics
+    install_crash_diagnostics(os.path.join(HERE, "logs"), os.path.join(HERE, cfg["state_dir"]),
+                              replaced_old=bool(args.replace))
+
     try:
-        register_autostart()
+        if cfg.get("autostart", True):
+            register_autostart()
+        else:
+            unregister_autostart()
     except OSError:
-        log.exception("could not register autostart (non-fatal, sync still runs this session)")
+        log.exception("could not update autostart (non-fatal, sync still runs this session)")
 
     hub = build_hub(cfg)
+    hub.activity.set_previews(cfg.get("activity_previews", True))
     push_listener = build_push_listener(cfg, hub)
     hub.start()
     if push_listener is not None:
@@ -389,14 +501,53 @@ def main() -> int:
     log.info("CopyClip tray starting (pid %d, devices: %s)", os.getpid(),
              ", ".join(d["name"] for d in cfg["devices"] if d.get("enabled", True)))
 
+    app_ref: dict[str, TrayApp] = {}
+    logs_dir = os.path.join(HERE, "logs")
+    service = ControlService(
+        hub, config_path=config_path, logs_dir=logs_dir,
+        key_path=os.path.join(HERE, cfg["key_file"]), push_listener=push_listener, root_dir=HERE,
+        read_clipboard=winclip.read_text, restart=_restart_self, pick_folder=launcher.pick_folder,
+        rollover_logs=_rollover_logs,
+        open_window=lambda route: app_ref["app"].open_ui(route),
+        quit_app=lambda: app_ref["app"].quit())
+    service.side_effects["autostart"] = lambda v: register_autostart() if v else unregister_autostart()
+
+    server = None
+    control_file = os.path.join(HERE, cfg["state_dir"], "control.json")
     try:
-        TrayApp(hub, cfg).run()
+        server = ControlServer(service)
+        server.start()
+        _write_control_file(control_file, server)
+    except OSError:
+        log.exception("control API could not start; the window and --status are unavailable")
+
+    app = TrayApp(hub, cfg, service, server, legacy_ui=args.legacy_ui or server is None)
+    app_ref["app"] = app
+    if args.open_ui:
+        threading.Timer(1.0, app.open_ui).start()
+    try:
+        app.run()
     finally:
+        if server is not None:
+            server.stop()
+        try:
+            os.unlink(control_file)
+        except OSError:
+            pass
         if push_listener is not None:
             push_listener.stop()
         hub.stop()
         guard.release()
     return 0
+
+
+def _rollover_logs() -> None:
+    """Archive the current log and start a fresh one, safely, through the active handler."""
+    import logging.handlers
+    for handler in logging.getLogger().handlers:
+        inner = getattr(handler, "inner", handler)
+        if isinstance(inner, logging.handlers.RotatingFileHandler):
+            inner.doRollover()
 
 
 if __name__ == "__main__":

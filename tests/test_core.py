@@ -346,7 +346,7 @@ def test_policy():
           "too large" in pol.reject_reason(ClipPayload.from_text("y" * 101, "x")))
     check("denylist honoured",
           "denylist" in pol.reject_reason(
-              ClipPayload.from_text("-----BEGIN OPENSSH PRIVATE KEY-----", "x")))
+              ClipPayload.from_text("-----BEGIN OPENSSH PRIVATE KEY-----", "x")))  # privacy-ok: test string
     check("sensitive clips rejected when allow_sensitive is false",
           "sensitive" in pol.reject_reason(
               ClipPayload.from_text("hunter2", "x", sensitive=True)))
@@ -933,7 +933,7 @@ def test_winclip_concurrency():
 
 def test_write_image_excludes_from_clipboard_history():
     """A device-synced image must not appear in (or evict entries from) Windows Clipboard
-    History -- see bugs/BUG-005's Open points for the full investigation. This checks that
+    History -- see docs/bugs/BUG-005's Open points for the full investigation. This checks that
     CF_CAN_INCLUDE_IN_HISTORY=0 is actually set alongside the image data; whether that
     genuinely stops History from evicting other entries is real-use verification, not
     something a unit test can observe (there's no API to inspect History's own state).

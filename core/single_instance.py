@@ -34,6 +34,37 @@ kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
 
 ERROR_ALREADY_EXISTS = 183
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+kernel32.OpenProcess.restype = wintypes.HANDLE
+kernel32.QueryFullProcessImageNameW.argtypes = [
+    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+# Executables a CopyClip instance can legitimately run as.
+# CopyClip_Python.exe is a renamed pythonw some installs launch the tray with (see start-up scripts).
+EXPECTED_IMAGES = ("python.exe", "pythonw.exe", "copyclip.exe", "copyclip_python.exe")
+
+
+def process_image_name(pid: int) -> str | None:
+    """Lower-case executable file name of `pid`, or None if it cannot be determined."""
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(1024)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return None
+        return os.path.basename(buf.value).lower()
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def looks_like_copyclip(pid: int) -> bool:
+    """Guard for --replace: a stale or reused PID must never get an unrelated process killed."""
+    return process_image_name(pid) in EXPECTED_IMAGES
 
 # "Local\" scopes the mutex to the current logon session, which is the right boundary: the
 # clipboard is per-session, so a daemon in another session is not a conflict.
@@ -50,6 +81,20 @@ class AlreadyRunning(RuntimeError):
             f"  logs look inconsistent, so this instance is stopping.\n"
             f"  Use --replace to take over, or close the other window first."
         )
+
+
+SYNCHRONIZE = 0x00100000
+kernel32.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.OpenMutexW.restype = wintypes.HANDLE
+
+
+def is_running(mutex_name: str = MUTEX_NAME) -> bool:
+    """True if some process in this session currently holds the singleton. Never takes it."""
+    handle = kernel32.OpenMutexW(SYNCHRONIZE, False, mutex_name)
+    if handle:
+        kernel32.CloseHandle(handle)
+        return True
+    return False
 
 
 class SingleInstance:
@@ -100,6 +145,11 @@ class SingleInstance:
             raise AlreadyRunning(other)
 
         if other and other != os.getpid():
+            if not looks_like_copyclip(other):
+                log.error("--replace: PID %s (%s) is not a Python process, so it is not being "
+                          "killed. Remove %s if it is stale.", other,
+                          process_image_name(other) or "gone", self.pidfile)
+                raise AlreadyRunning(other)
             log.warning("--replace: terminating existing CopyClip (PID %s)", other)
             try:
                 os.kill(other, signal.SIGTERM)

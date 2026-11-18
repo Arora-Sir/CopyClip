@@ -35,7 +35,7 @@ import java.util.List;
 /**
  * THROWAWAY device spike for image clipboard sync. Not shipped, not referenced by
  * ClipBridge.java. Exists only to answer the 9 measured questions in the image-sync plan
- * (bugs/SPIKE-IMAGE-CLIPBOARD.md) before any production code is written.
+ * (docs/bugs/SPIKE-IMAGE-CLIPBOARD.md) before any production code is written.
  *
  * Ported from otherCopyProjects/scrcpy: the ActivityThread/FakeContext trick
  * (Workarounds.java, FakeContext.java) is used ONLY to obtain a working ContentResolver

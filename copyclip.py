@@ -14,9 +14,7 @@ Run:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import logging.handlers
 import os
 import signal
 import sys
@@ -32,7 +30,10 @@ if os.name == "nt":
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+from core import config as _cfg                 # noqa: E402
+from core import logsetup as _logsetup          # noqa: E402
 from core.baseline_store import BaselineStore   # noqa: E402
+from core.config import ConfigError             # noqa: E402
 from core.dedup import RecentClips              # noqa: E402
 from core.hub import Hub                        # noqa: E402
 from core.outbox import Outbox                  # noqa: E402
@@ -46,101 +47,15 @@ from transports.adb_transport import AdbTransport  # noqa: E402
 
 log = logging.getLogger("copyclip")
 
-DEFAULT_CONFIG = {
-    "devices": [
-        {"name": "phone", "transport": "adb", "device": "100.64.0.11:5555",
-         "enabled": True},
-    ],
-    "domains": [],
-
-    "adb": "adb",
-    "dex": "bin/clipbridge.dex",
-    "key_file": "copyclip.key",
-    "state_dir": "state",
-
-    "max_chars": 800000,
-    "denylist_regex": [],
-    "allow_non_text": False,
-
-    "allow_images": False,
-    "max_image_bytes": 62_914_560,
-    "image_chunk_bytes": 49_152,
-
-    "screenshot_backup_dir": "",
-    "screenshot_backup_include_devices": True,
-    "screenshot_device_subfolders": True,
-    "screenshot_exclude_from_history": True,
-
-    "camera_backup": True,
-    "camera_backup_dir": "",
-
-    "allow_recopy": True,
-    "direct_password_sync": False,
-
-    "push_port": 8387,
-    "adopt_on_connect": False,
-    "dedup_ttl_s": 90.0,
-    "reconnect_min_s": 1.0,
-    "reconnect_max_s": 30.0,
-    "idle_ping_s": 60.0,
-    "ack_timeout_s": 4.0,
-
-    "log_level": "INFO",
-}
-
-
-# ---------------------------------------------------------------- config
-
-def load_config(path: str) -> dict:
-    cfg = dict(DEFAULT_CONFIG)
-    if os.path.isfile(path):
-        with open(path, "r", encoding="utf-8") as fh:
-            cfg.update(json.load(fh))
-    return _migrate(cfg)
-
-
-def _migrate(cfg: dict) -> dict:
-    """Accept the v1 single-device config unchanged.
-
-    v1 had a flat `device`/`transport` pair. Rather than force a config rewrite, fold it
-    into the v2 device list so an old config keeps working exactly as before.
-    """
-    if cfg.get("devices"):
-        return cfg
-    legacy = cfg.get("device")
-    if not legacy:
-        return cfg
-    cfg["devices"] = [{
-        "name": "phone",
-        "transport": cfg.get("transport", "adb"),
-        "device": legacy,
-        "tcp_host": cfg.get("tcp_host"),
-        "tcp_port": cfg.get("tcp_port"),
-        "enabled": True,
-    }]
-    log.debug("migrated v1 single-device config")
-    return cfg
+# Config defaults, validation and key handling live in core/config.py. These names stay
+# importable from here for the tray, the tests and any external script.
+DEFAULT_CONFIG = _cfg.DEFAULT_CONFIG
+load_config = _cfg.load_config
+_migrate = _cfg.migrate
 
 
 def setup_logging(level: str) -> None:
-    logs = os.path.join(HERE, "logs")
-    os.makedirs(logs, exist_ok=True)
-    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-                            "%Y-%m-%d %H:%M:%S")
-    root = logging.getLogger()
-    root.setLevel(getattr(logging, level.upper(), logging.INFO))
-    for handler in list(root.handlers):
-        root.removeHandler(handler)
-
-    fh = logging.handlers.RotatingFileHandler(
-        os.path.join(logs, "copyclip.log"), maxBytes=2_000_000, backupCount=3,
-        encoding="utf-8")
-    fh.setFormatter(fmt)
-    root.addHandler(fh)
-
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(fmt)
-    root.addHandler(sh)
+    _logsetup.setup_logging(level, os.path.join(HERE, "logs"))
 
 
 # ------------------------------------------------------------- factories
@@ -162,13 +77,10 @@ def make_transport_factory(cfg: dict, dev: dict):
     if kind == "tcp":
         from transports.tcp_transport import TcpTransport
         key_path = os.path.join(HERE, cfg["key_file"])
-        if not os.path.isfile(key_path):
-            raise TransportError(
-                f"{key_path} missing. See termux\\setup_termux.md to create the shared key.")
-        with open(key_path, "rb") as fh:
-            key = fh.read().strip()
-        if len(key) < 32:
-            raise TransportError("key file is too short; use at least 32 bytes")
+        try:
+            key = _cfg.read_key_file(key_path)
+        except ConfigError as exc:
+            raise TransportError(f"{exc}. See termux\\setup_termux.md to create the shared key.") from exc
         host = dev.get("tcp_host") or dev["device"].split(":")[0]
         port = int(dev.get("tcp_port") or 8385)
         return lambda: TcpTransport(host, port, key)
@@ -194,15 +106,12 @@ def build_hub(cfg: dict) -> Hub:
     android: dict[str, AndroidNode] = {}
     hub_ref: dict[str, Hub] = {}
     key_path = os.path.join(HERE, cfg.get("key_file", "copyclip.key"))
-    key_hex = ""
-    if os.path.isfile(key_path):
-        try:
-            with open(key_path, "r", encoding="utf-8") as f:
-                key_hex = f.read().strip()
-        except Exception:
-            pass
+    try:
+        key_hex = _cfg.read_key_file(key_path).decode("ascii", "replace")
+    except ConfigError:
+        key_hex = ""
 
-    hub_ip = cfg.get("hub_ip", "100.64.0.1")
+    hub_ip = _cfg.resolve_hub_ip(cfg)
     push_port = int(cfg.get("push_port", 8387))
 
     def on_connect(node: AndroidNode) -> None:
@@ -263,6 +172,7 @@ def build_hub(cfg: dict) -> Hub:
         dedup=RecentClips(ttl=cfg["dedup_ttl_s"]),
         baseline_store=BaselineStore(os.path.join(HERE, cfg["state_dir"], "baseline.json")),
         adopt_on_connect=cfg.get("adopt_on_connect", False),
+        filter_previews=cfg.get("filter_screenshot_previews", True),
         direct_password_sync=cfg.get("direct_password_sync", False),
         allow_recopy=cfg.get("allow_recopy", True),
     )
@@ -279,20 +189,57 @@ def build_push_listener(cfg: dict, hub: Hub):
     from transports.push_listener import PushListener
 
     key_path = os.path.join(HERE, cfg["key_file"])
-    if not os.path.isfile(key_path):
-        log.warning("push listener disabled: %s missing", key_path)
-        return None
-    with open(key_path, "rb") as fh:
-        key = fh.read().strip()
-    if len(key) < 32:
-        log.warning("push listener disabled: key file is too short")
+    try:
+        key = _cfg.read_key_file(key_path)
+    except ConfigError as exc:
+        log.warning("push listener disabled: %s", exc)
         return None
     return PushListener(int(cfg.get("push_port", 8387)), key, hub)
 
 
 # ---------------------------------------------------------------- status
 
+def status_from_running_daemon(cfg: dict, out=print) -> int:
+    """Report from the live daemon's control API. Starting a second hub here would restart
+    each device's ClipBridge underneath the real daemon."""
+    import json
+    import urllib.request
+
+    path = os.path.join(HERE, cfg["state_dir"], "control.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            ctl = json.load(fh)
+        req = urllib.request.Request(f"http://127.0.0.1:{int(ctl['port'])}/api/status",
+                                     headers={"X-CopyClip-Token": ctl["token"]})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            status = json.load(resp)
+    except Exception as exc:
+        out(f"CopyClip is running (pid file present) but its control API did not answer: {exc}")
+        return 1
+    out(f"daemon  : running, pid {status.get('pid')}, up {status.get('uptime_s', 0)} s, "
+        f"v{status.get('version')}")
+    out(f"sync    : {'PAUSED' if status.get('paused') else 'active'}")
+    bad = 0
+    for name, info in status["nodes"].items():
+        if name == "laptop":
+            continue
+        state = "paused" if info["paused"] else "connected" if info["available"] else "UNREACHABLE"
+        bad += state == "UNREACHABLE"
+        extra = " (locked)" if info.get("locked") else ""
+        err = f"  {info['last_error']}" if state == "UNREACHABLE" and info.get("last_error") else ""
+        out(f"{name:<8}: {state}{extra}{err}")
+    for d in status.get("domains", []):
+        out(f"{d['domain']:<8}: continuity={'healthy' if d['healthy'] else 'DEGRADED'}, "
+            f"representative={d['representative']}")
+    if status.get("outbox"):
+        out(f"outbox  : pending {', '.join(status['outbox'])}")
+    return 1 if bad else 0
+
+
 def cmd_status(cfg: dict) -> int:
+    from core.single_instance import is_running
+    if is_running():
+        return status_from_running_daemon(cfg)
     print(f"devices : {', '.join(d['name'] for d in cfg['devices'])}")
     for spec in cfg.get("domains", []):
         print(f"domain  : {spec['name']} = {' + '.join(spec['members'])}")
@@ -347,7 +294,13 @@ def main() -> int:
                     help="stop an already-running CopyClip and take over")
     args = ap.parse_args()
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as exc:
+        print("CopyClip cannot start, config.json has problems:", file=sys.stderr)
+        for problem in exc.problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 2
     setup_logging(args.log_level or cfg["log_level"])
 
     if args.status:

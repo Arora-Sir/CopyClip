@@ -24,8 +24,10 @@ sys.path.insert(0, ROOT)
 
 import winclip
 
-SERIAL = "100.64.0.12:5555"
-CAMERA_DIR = r"<home>\Pictures\Screenshots\Temporary Screenshots\Camera"
+import device_env  # noqa: E402
+
+SERIAL = device_env.device_address("tab")
+CAMERA_DIR = os.path.join(device_env.screenshot_dir(), "Camera")
 
 
 def create_dummy_jpeg_50mb() -> tuple[bytes, str]:

@@ -60,6 +60,7 @@ class WindowsNode(ClipboardNode):
         self._write_lock = threading.Lock()
         self._own_write_seq: int | None = None
         self._last_saved_screenshot: tuple[str, int, float, str | None] | None = None
+        self._saved_by_sha: dict[str, str] = {}
         self._screenshot_dir = screenshot_dir or None
         self._screenshot_include_devices = screenshot_include_devices
         self._screenshot_device_subfolders = screenshot_device_subfolders
@@ -238,8 +239,52 @@ class WindowsNode(ClipboardNode):
                         log.debug("[%s] thumbnail prune skipped: %s", self.name, exc)
 
             self._last_saved_screenshot = (path, current_size, now, payload.origin)
+            self._remember_saved(payload.sha256, path)
         except Exception:
             log.warning("[%s] screenshot backup failed", self.name, exc_info=True)
+
+    def _remember_saved(self, sha: str, path: str) -> None:
+        self._saved_by_sha[sha] = path
+        while len(self._saved_by_sha) > 80:
+            self._saved_by_sha.pop(next(iter(self._saved_by_sha)))
+
+    def saved_path(self, sha: str) -> str | None:
+        """File this node saved for an image with this hash, if it still exists."""
+        path = self._saved_by_sha.get(sha)
+        return path if path and os.path.isfile(path) else None
+
+    def copy_text_to_clipboard(self, text: str) -> None:
+        """Put text from Activity on the clipboard. A person asked for it, so it is not synced anywhere."""
+        with self._write_lock:
+            winclip.write_text(text)
+            self._own_write_seq = winclip.sequence_number()
+
+    def copy_file_to_clipboard(self, path: str, mime: str) -> None:
+        """Put a saved picture on the clipboard for pasting. A person asked for it, so it is not
+        synced anywhere and not saved again."""
+        with open(path, "rb") as fh:
+            data = fh.read()
+        with self._write_lock:
+            winclip.write_image(data, mime, exclude_from_history=self._exclude_synced_images_from_history)
+            self._own_write_seq = winclip.sequence_number()
+
+    def replace_last_screenshot(self, payload: ClipPayload) -> None:
+        """Swap the file saved moments ago for the device's original (same pixels, has Exif)."""
+        last = self._last_saved_screenshot
+        if last is None or not payload.origin or last[3] != payload.origin or time.time() - last[2] > 8.0:
+            return
+        path = last[0]
+        if not os.path.exists(path):
+            return
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(payload.data)
+        os.replace(tmp, path)
+        _notify_shell(path, is_delete=False)
+        self._last_saved_screenshot = (path, len(payload.data), last[2], last[3])
+        self._remember_saved(payload.sha256, path)
+        log.info("[%s] screenshot file replaced by the device's original (has capture metadata): %s",
+                 self.name, path)
 
     def _save_camera_photo(self, payload: ClipPayload) -> None:
         if not self._screenshot_dir or not self._camera_backup:

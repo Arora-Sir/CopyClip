@@ -20,8 +20,10 @@ import winclip  # noqa: E402
 import winimage  # noqa: E402
 
 LOG_PATH = os.path.join(ROOT, "logs", "copyclip.log")
-TARGET_DEVICE = "100.64.0.12:5555"
-SS_DIR = r"<home>\Pictures\Screenshots\Temporary Screenshots"
+import device_env  # noqa: E402
+
+TARGET_DEVICE = device_env.device_address("tab")
+SS_DIR = device_env.screenshot_dir()
 CAM_DIR = os.path.join(SS_DIR, "Camera")
 
 
@@ -182,9 +184,9 @@ if __name__ == "__main__":
     devices = [TARGET_DEVICE]
     if len(sys.argv) > 1:
         devices = [sys.argv[1]]
-    elif "100.64.0.11:5555" != TARGET_DEVICE:
+    elif device_env.device_address("phone") != TARGET_DEVICE:
         # Also test phone if connected
-        devices = [TARGET_DEVICE, "100.64.0.11:5555"]
+        devices = [TARGET_DEVICE, device_env.device_address("phone")]
 
     for dev in devices:
         print(f"\n==========================================")

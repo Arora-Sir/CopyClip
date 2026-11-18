@@ -17,6 +17,7 @@ because this one is a real socket other tailnet devices could reach.
 from __future__ import annotations
 
 import logging
+import queue
 import socket
 import threading
 
@@ -48,7 +49,9 @@ class TcpTransport(Transport):
         except OSError as exc:
             raise TransportError(f"cannot reach {self.host}:{self.port}: {exc}") from exc
 
-        self._sock.settimeout(None)
+        # Bounded while handshaking: a peer that accepts and then never speaks must not
+        # hang the supervisor. Cleared once the channel is up and the reader owns it.
+        self._sock.settimeout(self.timeout)
         # TCP_NODELAY matters here: clipboard frames are small and latency sensitive, and
         # Nagle would otherwise sit on them waiting for more data.
         self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -56,15 +59,23 @@ class TcpTransport(Transport):
 
         try:
             self._handshake()
-        except Exception:
+        except TransportError:
             self.close()
             raise
+        except Exception as exc:
+            self.close()
+            raise TransportError(f"handshake with {self.host}:{self.port} failed: {exc}") from exc
+        self._sock.settimeout(None)
 
         self._reader = threading.Thread(target=self._read_loop, name="copyclip-tcp-reader",
                                         daemon=True)
         self._reader.start()
 
-        first = self.inbox.get(timeout=self.timeout)
+        try:
+            first = self.inbox.get(timeout=self.timeout)
+        except queue.Empty:
+            self.close()
+            raise TransportError("no READY from the peer after a successful handshake") from None
         if not first.startswith("READY"):
             self.close()
             raise TransportError(f"unexpected greeting: {first!r}")

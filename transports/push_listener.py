@@ -3,7 +3,7 @@
 Every other transport has the hub dialing OUT to a device's bridge (TcpTransport,
 AdbTransport). This is the one direction that runs backwards, and exists for exactly one
 case: a device Android will not grant background clipboard access to (no shell UID
-available: see bugs/SPIKE-PIXEL-ACCESSIBILITY.md) can still push a clip in response to a
+available: see docs/bugs/SPIKE-PIXEL-ACCESSIBILITY.md) can still push a clip in response to a
 user action, because being the foreground app when the user taps "Send Clip" is a real,
 unprivileged read exemption Android already grants, confirmed live against this project's
 own ClipboardService logs. Same HMAC mutual handshake as tcp_transport.py, just played from
@@ -22,16 +22,38 @@ Wire, one connection per push:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import socket
 import threading
 
-from core.hub import Hub
+from typing import TYPE_CHECKING
+
 from core.models import ClipPayload
+
+if TYPE_CHECKING:   # annotation only: a transport must not depend on the routing hub
+    from core.hub import Hub
 
 from .framing import AuthError, challenge_response, new_nonce, open_frame, verify_challenge
 
 log = logging.getLogger("copyclip.push")
+
+# Longest line accepted at each stage. Handshake lines are tiny; the frame line carries a
+# whole base64 text clip, so it gets room for the 800k-character default plus overhead.
+MAX_HANDSHAKE_LINE = 256
+MAX_FRAME_LINE = 8 * 1024 * 1024
+
+# Node names a remote peer may never claim: a clip "from" the laptop would be written back
+# to every device as if the user had copied it on this PC.
+RESERVED_NODE_NAMES = frozenset({"laptop"})
+
+
+def _read_line(f, limit: int) -> str | None:
+    """One newline-terminated line, or None if it is longer than `limit` (hostile peer)."""
+    raw = f.readline(limit + 1)
+    if len(raw) > limit and not raw.endswith(b"\n"):
+        return None
+    return raw.decode("utf-8", "replace").strip()
 
 
 class PushListener:
@@ -81,8 +103,9 @@ class PushListener:
             nonce = new_nonce()
             f.write(f"HELLO {nonce}\n".encode())
 
-            auth_line = f.readline().decode("utf-8", "replace").strip()
-            if auth_line != f"AUTH {challenge_response(self.key, nonce)}":
+            auth_line = _read_line(f, MAX_HANDSHAKE_LINE)
+            expected = f"AUTH {challenge_response(self.key, nonce)}"
+            if auth_line is None or not hmac.compare_digest(auth_line.encode(), expected.encode()):
                 f.write(b"AUTH-FAIL\n")
                 log.warning("push from %s: bad AUTH, dropping", addr[0])
                 return
@@ -90,15 +113,17 @@ class PushListener:
 
             my_nonce = new_nonce()
             f.write(f"CHALLENGE {my_nonce}\n".encode())
-            resp_line = f.readline().decode("utf-8", "replace").strip()
-            if not resp_line.startswith("RESPONSE ") or not verify_challenge(
+            resp_line = _read_line(f, MAX_HANDSHAKE_LINE)
+            if resp_line is None or not resp_line.startswith("RESPONSE ") or not verify_challenge(
                     self.key, my_nonce, resp_line.split(" ", 1)[1]):
                 log.warning("push from %s: failed our challenge; wrong key or impostor",
                             addr[0])
                 return
 
-            frame = f.readline().decode("utf-8", "replace").strip()
+            frame = _read_line(f, MAX_FRAME_LINE)
             if not frame:
+                if frame is None:
+                    log.warning("push from %s: frame line too long, dropping", addr[0])
                 return
             try:
                 _, payload_line = open_frame(self.key, frame, 0)
@@ -126,6 +151,10 @@ class PushListener:
         parts = line.split(" ")
         if len(parts) < 6:
             f.write(b"STREAM-FAIL malformed\n")
+            return
+        if parts[1] in RESERVED_NODE_NAMES:
+            log.warning("direct stream from %s claimed reserved node name %r", addr[0], parts[1])
+            f.write(b"STREAM-FAIL reserved_name\n")
             return
         if len(parts) == 6:
             _, node, mime, sensitive, expected_sha, total_bytes_s = parts
@@ -190,6 +219,10 @@ class PushListener:
         parts = line.split(" ", 4)
         if len(parts) < 5 or parts[0] != "PUSH":
             f.write(b"PUSH-FAIL malformed\n")
+            return
+        if parts[1] in RESERVED_NODE_NAMES:
+            log.warning("push claimed reserved node name %r", parts[1])
+            f.write(b"PUSH-FAIL reserved_name\n")
             return
         _, node, mime, sensitive, b64 = parts
         try:

@@ -144,6 +144,7 @@ def test_write_triggered_from_on_connect_does_not_deadlock():
 
 def _wired_node(ack_timeout_s: float = 4.0) -> tuple[AndroidNode, FakeTransport]:
     node = AndroidNode("phone", transport_factory=lambda: None, ack_timeout_s=ack_timeout_s)
+    node.final_ack_floor_s = 0.0  # production floor is 60 s; keep the suite fast
     fake = FakeTransport()
     node._transport = fake
     node._connected = True

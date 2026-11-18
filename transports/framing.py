@@ -53,7 +53,9 @@ def open_frame(key: bytes, raw: str, last_seq: int) -> tuple[int, str]:
         raise AuthError("bad sequence number") from exc
     if seq <= last_seq:
         raise AuthError(f"replay or reorder: seq {seq} <= {last_seq}")
-    if not hmac.compare_digest(mac, _mac(key, seq, payload)):
+    # Compare as bytes: compare_digest raises TypeError on non-ASCII str, and a hostile peer
+    # must get a clean AuthError, not an exception that escapes the reader thread.
+    if not hmac.compare_digest(mac.encode("utf-8", "replace"), _mac(key, seq, payload).encode("ascii")):
         raise AuthError("bad MAC")
     return seq, payload
 
@@ -63,4 +65,5 @@ def challenge_response(key: bytes, nonce: str) -> str:
 
 
 def verify_challenge(key: bytes, nonce: str, response: str) -> bool:
-    return hmac.compare_digest(response, challenge_response(key, nonce))
+    return hmac.compare_digest(response.encode("utf-8", "replace"),
+                               challenge_response(key, nonce).encode("ascii"))
