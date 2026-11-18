@@ -188,7 +188,8 @@ CopyClip stands on the work of others, and several of its decisions were made by
 
 - **[scrcpy](https://github.com/Genymobile/scrcpy)** by Genymobile: the technique of reaching Android's clipboard as the shell user through `app_process`, which is the foundation of ClipBridge.
 - **[Shizuku](https://github.com/RikkaApps/Shizuku)** and **Shizuku-API** by RikkaApps: the model for privileged helpers without root, and the reference for the optional Android app.
-- **[ClipCascade](https://github.com/Sathvik-Rao/ClipCascade)**, **[KDE Connect](https://github.com/KDE/kdeconnect-android)**, **[clipper](https://github.com/majido/clipper)**, **[AdbClipboard](https://github.com/PRosenb/AdbClipboard)** and **[ClipboardHelper](https://github.com/Potato-DiGua/ClipboardHelper)**: prior art whose designs and limits shaped what CopyClip does differently. What each contributed is recorded in [otherCopyProjects/NOTES.md](otherCopyProjects/NOTES.md).
+- **[ClipCascade](https://github.com/Sathvik-Rao/ClipCascade)**, **[KDE Connect](https://github.com/KDE/kdeconnect-android)**, **[clipper](https://github.com/majido/clipper)**, **[AdbClipboard](https://github.com/PRosenb/AdbClipboard)** and **[ClipboardHelper](https://github.com/Potato-DiGua/ClipboardHelper)**: prior art whose designs and limits shaped what CopyClip does differently. What each contributed is recorded in [docs/PRIOR_ART.md](docs/PRIOR_ART.md).
+- **[Sefirah](https://github.com/shrimqy/Sefirah)** and KDE Connect for the look of a modern device-sync utility (visual direction only, no code).
 - **[Tailscale](https://tailscale.com)** for the private network that makes direct device addressing safe.
 
 Thanks to everyone who maintains those projects.

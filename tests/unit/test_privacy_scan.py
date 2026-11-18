@@ -73,7 +73,7 @@ class PatternTests(unittest.TestCase):
 
     def test_binary_and_unscannable_files_skipped(self):
         self.assertFalse(ps._scannable("bin/clipbridge.dex"))
-        self.assertFalse(ps._scannable("otherCopyProjects/x/readme.md"))
+        self.assertFalse(ps._scannable("reference-projects/x/readme.md"))
         self.assertFalse(ps._scannable("tests/unit/test_privacy_scan.py"))
         self.assertTrue(ps._scannable("docs/bugs/BUG-001.md"))
 

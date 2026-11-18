@@ -2,25 +2,25 @@
 #
 # Syntax note: these are fnmatch globs, NOT gitignore patterns. Each line is tested
 # against the path relative to the scan root, the bare filename, and every individual
-# path component, so a plain directory name like "otherCopyProjects" is enough and
+# path component, so a plain directory name like "reference-projects" is enough and
 # needs no trailing slash or wildcard.
 #
 # graphify already skips __pycache__, .git, build, dist, out, target, node_modules
 # and venvs on its own, so those are deliberately not repeated here.
 
 # The reason this file exists.
-# otherCopyProjects holds 9 shallow clones of upstream projects (scrcpy, ClipCascade,
+# reference-projects holds 9 shallow clones of upstream projects (scrcpy, ClipCascade,
 # Shizuku, kdeconnect-android and friends). Graphing them pushed the project to ~7,450
 # nodes, past graphify's HTML visualisation limit, and the rebuild failed outright with
 # "Graph has 7450 nodes - too large for HTML viz". They are reference material, not our
 # code, so they have no business in this project's knowledge graph.
 #
 # Caveat: graphify has no negation syntax (no "!pattern"), so this blanket rule also
-# excludes otherCopyProjects/NOTES.md. That is the deliberate trade: a rule that names
-# the 9 clone directories individually would let NOTES.md through, but would silently
-# break the graph again the moment clone_all.ps1 gains a tenth repo. Read NOTES.md
+# excludes docs/PRIOR_ART.md. That is the deliberate trade: a rule that names
+# the 9 clone directories individually would let docs/PRIOR_ART.md through, but would silently
+# break the graph again the moment tools/clone_reference_projects.ps1 gains a tenth repo. Read docs/PRIOR_ART.md
 # directly; its conclusions are summarised in README.md anyway.
-otherCopyProjects
+reference-projects
 
 # Build output. clipbridge.dex is generated from android/ClipBridge.java by
 # android/build_dex.ps1; the Java source is the thing worth graphing.

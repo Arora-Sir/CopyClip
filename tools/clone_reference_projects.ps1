@@ -3,10 +3,12 @@
 # Shallow (--depth 1) single-branch clones: these are read-only references, not forks you
 # will commit to. Rerun any time to refresh; existing clones are skipped.
 #
-# See NOTES.md for what was actually taken from each one.
+# See docs/PRIOR_ART.md for what was actually taken from each one.
 
 $ErrorActionPreference = "Continue"
-Set-Location $PSScriptRoot
+$dest = Join-Path (Split-Path -Parent $PSScriptRoot) "reference-projects"
+New-Item -ItemType Directory -Path $dest -Force | Out-Null
+Set-Location $dest
 
 $repos = @(
     @{ name = "scrcpy";            url = "https://github.com/Genymobile/scrcpy.git" },
@@ -34,4 +36,4 @@ foreach ($r in $repos) {
     }
 }
 
-Write-Host "`nDone. See NOTES.md for what each repo contributed." -ForegroundColor Green
+Write-Host "`nDone. See docs/PRIOR_ART.md for what each repo contributed." -ForegroundColor Green

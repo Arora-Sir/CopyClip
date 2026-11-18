@@ -27,7 +27,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEXT_EXT = {".py", ".md", ".txt", ".json", ".ps1", ".bat", ".vbs", ".java", ".kt", ".kts", ".xml",
             ".gradle", ".properties", ".js", ".css", ".html", ".toml", ".cfg", ".ini", ".yml",
             ".yaml", ".sh", ".aidl", ".tsv", ""}
-SKIP_DIRS = {".git", "otherCopyProjects", "graphify-out", "__pycache__", ".pytest_cache", "node_modules"}
+SKIP_DIRS = {".git", "reference-projects", "graphify-out", "__pycache__", ".pytest_cache", "node_modules"}
 SKIP_FILES = {"privacy_scan.py", "test_privacy_scan.py"}   # they contain the patterns on purpose
 MAX_BYTES = 2_000_000
 

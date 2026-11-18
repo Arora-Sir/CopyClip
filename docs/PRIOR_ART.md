@@ -1,6 +1,6 @@
 # Reference projects: what each one actually contributed
 
-Shallow clones (`clone_all.ps1`). These are read-only references, not forks to commit to.
+Shallow clones made by `tools/clone_reference_projects.ps1` into the untracked `reference-projects/` folder. These are read-only references, not forks to commit to.
 This file is the point of the folder: the source is just evidence.
 
 Everything below was checked against the real repos, and in scrcpy's case against the

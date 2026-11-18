@@ -57,7 +57,7 @@ New-Item -ItemType Directory -Path $outDir   -Force | Out-Null
 # type ClipBridge's FakeContext needs (android.content.IContentProvider is @hide) -- the
 # real interface is supplied by the boot classloader at runtime. Compiles fine against the
 # stock android.jar above; no patched hidden-API jar needed. See
-# otherCopyProjects/NOTES.md's corrected FakeContext section and
+# docs/PRIOR_ART.md's corrected FakeContext section and
 # docs/bugs/SPIKE-IMAGE-CLIPBOARD.md for what this was verified against.
 #
 # -source/-target rather than --release: --release pins the JDK platform API and

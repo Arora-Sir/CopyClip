@@ -9,8 +9,8 @@ SDK 36) on **2026-08-06**.
 
 ## Why this exists
 
-No project in `otherCopyProjects/` (scrcpy, ClipCascade, KDE Connect, Shizuku, ...) has ever
-written an image to the Android clipboard from a non-app process (`otherCopyProjects/NOTES.md`
+No project in `reference-projects/` (scrcpy, ClipCascade, KDE Connect, Shizuku, ...) has ever
+written an image to the Android clipboard from a non-app process (`docs/PRIOR_ART.md`
 research, see the image-sync implementation plan §1). This had to be measured before any
 production code was written.
 
@@ -86,7 +86,7 @@ CLIPWRITE_OK uri=content://media/external/images/media/1001223578 readback=null(
 
 `setPrimaryClip` raised no exception (matches text's documented behavior), and the
 description readback came back `null` -- exactly the same silent-discard-while-locked
-behavior `NOTES.md`/`ARCHITECTURE.md` §6.1 already measured for text. **No new lock-handling
+behavior `docs/PRIOR_ART.md`/`ARCHITECTURE.md` §6.1 already measured for text. **No new lock-handling
 code is needed for images**; the existing `doSet`/`pendingSet`/keyguard-replay logic in
 `ClipBridge.java` is content-type-agnostic and covers this by construction.
 

@@ -37,7 +37,7 @@ import java.util.List;
  * ClipBridge.java. Exists only to answer the 9 measured questions in the image-sync plan
  * (docs/bugs/SPIKE-IMAGE-CLIPBOARD.md) before any production code is written.
  *
- * Ported from otherCopyProjects/scrcpy: the ActivityThread/FakeContext trick
+ * Ported from reference-projects/scrcpy: the ActivityThread/FakeContext trick
  * (Workarounds.java, FakeContext.java) is used ONLY to obtain a working ContentResolver
  * under app_process. Clipboard reads/writes reuse ClipBridge.java's own proven reflective
  * IClipboard-binder approach, not FakeContext's getSystemService(CLIPBOARD_SERVICE) -- per
@@ -218,7 +218,7 @@ public final class ImageSpike {
     // ---------------------------------------------------------------- FakeContext (scrcpy port)
 
     /**
-     * Ported from otherCopyProjects/scrcpy FakeContext.java + Workarounds.java. Used ONLY to
+     * Ported from reference-projects/scrcpy FakeContext.java + Workarounds.java. Used ONLY to
      * obtain a working ContentResolver -- the clipboard itself is never touched through this
      * class, exactly per the plan's decision to leave the proven IClipboard-binder path alone.
      */
@@ -257,7 +257,7 @@ public final class ImageSpike {
         private final ContentResolver contentResolver = new ContentResolver(this) {
             // @Override (but super-class method not visible to javac against the stock SDK
             // jar -- android.content.ContentResolver#acquireProvider etc. are @hide. Verbatim
-            // pattern from otherCopyProjects/scrcpy FakeContext.java.)
+            // pattern from reference-projects/scrcpy FakeContext.java.)
             protected IContentProvider acquireProvider(Context c, String name) {
                 return SpikeActivityManager.get().getContentProviderExternal(name, new Binder());
             }

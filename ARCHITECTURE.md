@@ -319,7 +319,7 @@ Writing an image to the Android clipboard needs a real `content://` URI backing 
 `content://` URI needs a working `ContentResolver`. Under `app_process` (no installed app,
 no manifest, no `Context` in the normal sense), that resolver does not exist by default.
 
-The fix, ported from `otherCopyProjects/scrcpy`'s `FakeContext`/`Workarounds` classes and
+The fix, ported from `reference-projects/scrcpy`'s `FakeContext`/`Workarounds` classes and
 scoped **narrowly** to this one purpose: a hand-built `ActivityThread` gives access to the
 system `Context`, and a `ContextWrapper` subclass overrides `getContentResolver()` to route
 provider access through `ActivityManager.getContentProviderExternal(...)`: the same binder
@@ -1341,5 +1341,5 @@ The startup cost and memory of the app window have not been measured. On the one
   diagram.
 - [docs/bugs/](docs/bugs/README.md): detailed, dated writeups of specific past incidents, with
   measured evidence, root cause, fix, and rollback instructions for each.
-- [otherCopyProjects/NOTES.md](otherCopyProjects/NOTES.md): what was adopted or rejected
+- [docs/PRIOR_ART.md](docs/PRIOR_ART.md): what was adopted or rejected
   from prior art (scrcpy, ClipCascade, and others) and why.

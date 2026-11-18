@@ -26,11 +26,11 @@ never root, measure don't assume) apply to every step below and are not repeated
 
 ## 2. Sweep prior art before designing anything
 
-- Search `otherCopyProjects/` for the same problem solved elsewhere (scrcpy, ClipCascade,
+- Search `reference-projects/` for the same problem solved elsewhere (scrcpy, ClipCascade,
   KDE Connect, Shizuku, Shizuku-API, AdbClipboard, ClipboardHelper, clipper,
   awesome-shizuku). Report negative findings too — "nobody has done this" is a real,
   useful, load-bearing finding, not a failed search.
-- Check `otherCopyProjects/NOTES.md` for what was already adopted or rejected and why, but
+- Check `docs/PRIOR_ART.md` for what was already adopted or rejected and why, but
   verify any specific technical claim in it against the actual source in that folder
   before relying on it — it has been wrong once before (see its corrected FakeContext
   section), and it is meant to be evidence-checked, not taken on faith.
@@ -42,7 +42,7 @@ never root, measure don't assume) apply to every step below and are not repeated
 
 ## 3. Spike anything unproven, on a real device, before writing production code
 
-- If the feature needs a mechanism nothing in this codebase or `otherCopyProjects/` has
+- If the feature needs a mechanism nothing in this codebase or `reference-projects/` has
   ever demonstrated working (image sync's case: writing an image to the Android clipboard
   from a non-app process), build a throwaway probe under `android/spike/`, compile it with
   its own `build_*_dex.ps1` (copy the pattern from `android/spike/build_spike_dex.ps1`),

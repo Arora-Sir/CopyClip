@@ -948,7 +948,7 @@ public final class ClipBridge {
     // ---------------------------------------------------------------- imaging (FakeContext)
 
     /**
-     * Ported from otherCopyProjects/scrcpy FakeContext.java + Workarounds.java, scoped
+     * Ported from reference-projects/scrcpy FakeContext.java + Workarounds.java, scoped
      * narrowly to obtaining a working ContentResolver under app_process: the clipboard
      * itself is never touched through this class; setPrimaryClip/getPrimaryClip stay on the
      * proven reflective IClipboard-binder path above.
@@ -1949,7 +1949,7 @@ public final class ClipBridge {
      * the device is locked. Mirrors doSet()'s structure exactly: the write is verified by
      * reading the description straight back, because a locked device accepts
      * setPrimaryClip and discards it without raising anything: the same silent-discard
-     * behaviour measured for text (NOTES.md) and re-confirmed for images
+     * behaviour measured for text (docs/PRIOR_ART.md) and re-confirmed for images
      * (docs/bugs/SPIKE-IMAGE-CLIPBOARD.md).
      */
     private static void doSetImage(byte[] data, String mime) throws Exception {
