@@ -27,7 +27,7 @@ A small tray service keeps clipboards in sync. Click the tray icon to open the C
 | **Activity** | Every clip that moved: where it came from, where it went, how long it took, and the reason when it was skipped. Text previews stay in memory on the PC; sensitive clips never get a preview. Every text or picture row has a copy button at its right end, and pictures show as thumbnails with a **Copy full image** button in the detail panel |
 | **Logs** | Live log with level, device and text filters, repeated errors folded into one line with a count, copy, export and archive |
 | **Settings** | Everything configurable, with inline validation, an unsaved-changes bar, and a "Needs restart" tag on the few settings that cannot apply live |
-| **Tray menu / flyout** | Pause for 15 minutes, 1 hour or until resumed, per-device pause, send the current clipboard, recent pictures you can copy again, open the screenshots folder, quit. Optionally a compact flyout instead of the window |
+| **Tray menu / flyout** | Pause for 15 minutes, 1 hour or until resumed, per-device pause (remembered across restarts), send the current clipboard, recent pictures you can copy again, open the screenshots folder, quit. Optionally a compact flyout instead of the window |
 
 To see every screen without any device attached:
 
