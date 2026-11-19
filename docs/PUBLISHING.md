@@ -1,46 +1,38 @@
-# Publishing CopyClip publicly
+# Publishing CopyClip
 
-Status as of 2026-11-12: the GitHub repository is **private**. Nothing here has been done to it. This page is the checklist for the day you decide to open it up.
+Status as of 2026-11-19: the GitHub repository is **public** (published 2026-11-18, release v3.0.0, licence Apache-2.0). This page records how that was done and keeps the checklist for every later push.
 
-## 1. Decide things only the owner can decide
+## What was done on 2026-11-18
 
-| Decision | Why it matters |
+| Step | Result |
 | :--- | :--- |
-| **License** | Done: Apache-2.0. `LICENSE` and `NOTICE` are at the repo root and the README License section is updated |
-| **Author name in identifiers** | The Android package and the on-device helper class both use `com.mohitarora.copyclip` (the helper was renamed from the former `me.mohit.copyclip` on 2026-11-18, so the dex and the daemon must come from the same version). They credit the author. Rename them only if you want the name out of the code |
-| **Session logs** | `docs/sessions/` are working logs of the project. They were scrubbed of IPs and paths, but you may prefer not to publish them |
-| **`CLAUDE.md` and `.claude/`** | `CLAUDE.md` is git-ignored because it points at a private skills library. `.claude/skills/copyclip-feature` is still tracked; remove it from tracking if you do not want it public |
+| Licence | Apache-2.0. `LICENSE` and `NOTICE` are at the repo root, and `NOTICE` credits scrcpy, the Shizuku API and the Android build dependencies |
+| History | The history was rewritten in place with `git filter-repo` (not an orphan snapshot), so the commit history is kept. Personal email addresses, local paths and private IP addresses were replaced, and every commit uses the GitHub noreply author |
+| Old objects | The old, now unreferenced commits were still reachable by their exact hash. A GitHub Support request asks for garbage collection and removal of cached views. No fork or pull request ever existed, so nothing else holds them |
+| Identifiers | The Android package and the on-device helper class both use `com.mohitarora.copyclip` (the helper was renamed from the former `me.mohit.copyclip` on 2026-11-18, so the dex and the daemon must come from the same version) |
+| Private files | `CLAUDE.md`, `.claude/` settings, `config.json`, keys, logs and runtime state are git-ignored. `.claude/skills/copyclip-feature` stays tracked on purpose |
+| Contact | `contact@mohitarora.me`, listed in `SECURITY.md` and the README |
+| GitHub settings | Email privacy and push blocking for private emails are on |
 
-## 2. Do not push the existing history as it is
-
-The working tree is clean (`python tools/privacy_scan.py` reports 0), but git **history** still holds earlier versions of files with private Tailscale addresses and local paths (`python tools/privacy_scan.py --history` lists them). Anyone who clones the repository gets all of it.
-
-Safest route, a fresh repository from a single snapshot:
-
-```bash
-# from a clean checkout of the branch you want to publish
-git checkout --orphan public-main
-git add -A
-git status                      # confirm no config.json, *.key, logs/, state/ are listed
-git commit -m "CopyClip 3.0"
-# create a NEW empty GitHub repo, then:
-git remote add public https://github.com/<you>/CopyClip.git
-git push public public-main:main
-```
-
-Keep the old private repository as your archive. Rewriting history in place (git filter-repo) is possible but easier to get wrong, and every old clone and fork would still have the old data.
-
-## 3. Final checks
+## Before every push
 
 ```bash
-python tools/privacy_scan.py --all --history   # history findings are expected only on the OLD repo
-python tools/run_tests.py
+python tools/privacy_scan.py                 # working tree, must report 0 findings
+python tools/privacy_scan.py --history       # history, one finding is expected: a fake key string in an old test
+python tools/run_tests.py                    # unit tier, no devices
 git ls-files | findstr /i "config.json .key .pem .pid"   # must print nothing
+git config user.email                        # must be the GitHub noreply address, never a personal one
 ```
 
-Then read the README as a stranger would, and add screenshots to `docs/images/` and the README.
+Show the staged diff, the commit message and the target branch to the owner and wait for a yes before `git commit` or `git push`.
 
-## 4. After publishing
+## If history ever has to be rewritten again
+
+History cannot be unpublished. Anyone who cloned before a rewrite keeps the old data, and old commits stay fetchable by their hash until GitHub collects them. Rewrite only for a real leak, rotate any exposed secret first, and ask GitHub Support to garbage collect afterwards.
+
+## Housekeeping
 
 - Rotate the shared key (Settings, then Rotate key) if there is any chance the old one was ever visible.
-- Turn on GitHub secret scanning and branch protection for the new repository.
+- Keep GitHub secret scanning on. Branch protection is optional for a one-person project.
+- Screenshots in `docs/images/` are demo data from `python tools/demo_ui.py`. Retake them only when the UI changes.
+- `docs/sessions/` are scrubbed working logs of the project.

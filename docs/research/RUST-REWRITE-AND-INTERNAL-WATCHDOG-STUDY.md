@@ -1,9 +1,24 @@
 # CopyClip Future Architectural Study: Rust Rewrite and Internal Watchdog Architecture
 
 ## Status
-* **Status**: RFC / Future Research Only
+* **Status**: RFC / Future Research Only. Scheduled for a later session, not started.
 * **Target Milestone**: Post-V1 Stability. Do not implement until the current Python and Java Dex codebase is 100% complete, hardened, and verified in continuous daily production.
 * **Date Documented**: 2026-11-15
+* **Maintainer decisions (2026-11-19)**: a full rewrite is acceptable. It happens on a separate branch in parallel, so the Python version stays in production until the Rust version is fully tested, then everything moves over at once. Dependencies are allowed wherever they make the project better, which waives the zero-dependency rule for the Rust branch only. A standalone app window instead of a Chromium app window is a wanted outcome.
+
+### Review notes (2026-11-18 and 2026-11-19), to settle before any code
+These points in the study are wrong, unproven or smaller than stated. None is measured on this hardware yet.
+1. A Windows Service runs in session 0 and cannot reach the interactive user's clipboard or tray. Pattern 3 only works for a headless service split from a user-session agent.
+2. `RegisterApplicationRestart` only restarts an app that ran at least 60 seconds, and not after a clean exit or a hang kill.
+3. Removing `adb.exe` means implementing ADB RSA authentication and, on Android 11 and later, the wireless pairing flow. The current design (plain `adb`, shell UID, no app) is the proven one.
+4. Tokio, the `windows` crate and `tray-icon` are dependencies. That is now allowed on the Rust branch and must be written into `CLAUDE.md` when the branch starts.
+5. The SHA-256 and Base64 gains are probably negligible, because Python's `hashlib` already uses OpenSSL and releases the GIL on large buffers.
+6. The Rust column in the benchmark table is a projection. The Python column is real, but the RAM and startup figures should be re-measured on an idle PC, on Python 3.14 (the table says 3.11).
+7. The UI is an HTML app served by the local control API. A single exe needs the assets embedded and a window host, which is where the standalone window decision applies.
+8. The real bugs found so far were OS and device behaviour (locked devices, the clipboard 1418 error, Samsung echo, a browser process that lingers after its window closes, see BUG-025). A new language does not remove these, so the Win32 quirks must be reproduced in the Rust node.
+
+### First steps when it starts
+Re-measure the Python baseline on an idle PC, spike the clipboard node with the 1418 retry against the existing tests, choose the UI approach, then decide go or no-go. The Python unit and system tiers stay as the safety net, and `ClipBridge.java` stays as the on-device helper.
 
 ---
 

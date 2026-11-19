@@ -154,7 +154,7 @@ COPYCLIP_DEVICE_TESTS=1 python tools/run_tests.py --device tests/test_e2e.py   #
 
 **Health check from a terminal:** `python copyclip.py --status`. If CopyClip is running it asks the running service instead of starting a second one.
 
-**The window does not open.** The tray tries each browser in turn and logs what happened to `logs\copyclip.log` (look for `copyclip.launcher`). Run `python windows_app\tray.py --legacy-ui` to use the old Tk window, and see the log in `logs\copyclip.log`.
+**The window does not open, or opens slowly.** The tray tries each browser in turn and logs what happened to `logs\copyclip.log` (look for `copyclip.launcher`). A browser whose window was just closed can take 20 to 40 seconds to disappear, so each browser has up to four private profiles under `%LOCALAPPDATA%\CopyClip\ui-profile` and a new window uses a free one. The log line `exited without a window ... starting it again on another private profile` is that fallback at work. The folders hold no data you need, so they are safe to delete with CopyClip closed. Run `python windows_app\tray.py --legacy-ui` to use the old Tk window, and see the log in `logs\copyclip.log`.
 
 ## Project layout
 
