@@ -240,6 +240,131 @@ class EnsureWindowTests(unittest.TestCase):
         wb.assert_not_called()
 
 
+class WaitForWindowTests(unittest.TestCase):
+    def proc(self, alive):
+        p = mock.Mock()
+        p.poll.return_value = None if alive else 0
+        return p
+
+    def test_browser_that_exited_without_a_window_fails_fast_not_after_the_full_wait(self):
+        clock = FakeClock(0.0)
+        state = launcher._wait_for_window(self.proc(False), "CopyClip", sleep=clock.advance, clock=clock,
+                                          has_window=lambda: False)
+        self.assertEqual(state, "gone")
+        self.assertLess(clock(), launcher.WINDOW_WAIT_S / 2)
+
+    def test_hand_off_launcher_that_exits_but_shows_the_window_within_the_grace_is_a_success(self):
+        clock = FakeClock(0.0)
+        state = launcher._wait_for_window(self.proc(False), "CopyClip", sleep=clock.advance, clock=clock,
+                                          has_window=lambda: clock() >= launcher.GONE_GRACE_S - 0.5)
+        self.assertEqual(state, "window")
+
+    def test_still_running_browser_keeps_the_full_wait(self):
+        clock = FakeClock(0.0)
+        state = launcher._wait_for_window(self.proc(True), "CopyClip", sleep=clock.advance, clock=clock,
+                                          has_window=lambda: False)
+        self.assertEqual(state, "alive")
+        self.assertGreaterEqual(clock(), launcher.WINDOW_WAIT_S)
+
+
+class ProfileRotationTests(unittest.TestCase):
+    def setUp(self):
+        launcher._PROFILE_PROCS.clear()
+        launcher._BAD_PROFILES.clear()
+        self.addCleanup(launcher._PROFILE_PROCS.clear)
+        self.addCleanup(launcher._BAD_PROFILES.clear)
+
+    def proc(self, alive):
+        p = mock.Mock()
+        p.poll.return_value = None if alive else 0
+        return p
+
+    def test_slot_zero_keeps_the_original_folder_name(self):
+        self.assertTrue(launcher.profile_dir("C:\\b\\brave.exe").endswith(os.path.join("ui-profile", "brave")))
+        self.assertTrue(launcher.profile_dir("C:\\b\\brave.exe", 1).endswith(os.path.join("ui-profile", "brave-2")))
+
+    def test_first_free_slot_is_used(self):
+        self.assertEqual(launcher.pick_profile("C:\\b\\brave.exe"), launcher.profile_dir("C:\\b\\brave.exe", 0))
+
+    def test_a_slot_whose_last_browser_is_still_closing_is_skipped(self):
+        exe = "C:\\b\\brave.exe"
+        launcher._PROFILE_PROCS[launcher.profile_dir(exe, 0)] = self.proc(alive=True)
+        self.assertEqual(launcher.pick_profile(exe), launcher.profile_dir(exe, 1))
+
+    def test_a_slot_whose_browser_has_ended_is_reused(self):
+        exe = "C:\\b\\brave.exe"
+        launcher._PROFILE_PROCS[launcher.profile_dir(exe, 0)] = self.proc(alive=False)
+        self.assertEqual(launcher.pick_profile(exe), launcher.profile_dir(exe, 0))
+
+    def test_a_slot_marked_bad_is_skipped_until_it_expires(self):
+        exe = "C:\\b\\brave.exe"
+        clock = FakeClock(0.0)
+        launcher.mark_profile_bad(launcher.profile_dir(exe, 0), clock=clock)
+        self.assertEqual(launcher.pick_profile(exe, clock=clock), launcher.profile_dir(exe, 1))
+        clock.advance(launcher.BAD_PROFILE_S + 1)
+        self.assertEqual(launcher.pick_profile(exe, clock=clock), launcher.profile_dir(exe, 0))
+
+    def test_all_slots_busy_falls_back_to_slot_zero(self):
+        exe = "C:\\b\\brave.exe"
+        for slot in range(launcher.PROFILE_SLOTS):
+            launcher._PROFILE_PROCS[launcher.profile_dir(exe, slot)] = self.proc(alive=True)
+        self.assertEqual(launcher.pick_profile(exe), launcher.profile_dir(exe, 0))
+
+    def test_a_hand_off_launcher_does_not_replace_the_running_process_that_owns_the_profile(self):
+        owner, handoff = self.proc(alive=True), self.proc(alive=False)
+        launcher._remember_launch("p", owner)
+        launcher._remember_launch("p", handoff)
+        self.assertIs(launcher._PROFILE_PROCS["p"], owner)
+
+    def test_a_finished_process_is_replaced_by_the_next_launch(self):
+        old, new = self.proc(alive=False), self.proc(alive=True)
+        launcher._remember_launch("p", old)
+        launcher._remember_launch("p", new)
+        self.assertIs(launcher._PROFILE_PROCS["p"], new)
+
+
+class RetryOnAnotherProfileTests(unittest.TestCase):
+    def setUp(self):
+        launcher._BAD_PROFILES.clear()
+        self.addCleanup(launcher._BAD_PROFILES.clear)
+
+    def run_ensure(self, has_window, retry, remaining=()):
+        clock = FakeClock(0.0)
+        slot = launcher.WindowSlot("CopyClip", clock=clock)
+        slot._launching_until = 99999.0
+        launched = []
+        dead = mock.Mock()
+        dead.poll.return_value = 0
+        dead.copyclip_profile = "profile-1"
+
+        def fake_launch(*a, **k):
+            launched.append(a[0])
+            return dead
+        with mock.patch.object(launcher, "_launch", side_effect=fake_launch),                 mock.patch.object(launcher, "mark_profile_bad") as bad,                 mock.patch("webbrowser.open") as wb:
+            launcher._ensure_window(dead, list(remaining), "http://x/", False, (1, 2), None, slot, retry=retry,
+                                    sleep=clock.advance, clock=clock, has_window=lambda: has_window(launched))
+        return launched, bad, wb, slot
+
+    def test_exit_without_window_marks_the_profile_bad_and_restarts_the_same_browser_once(self):
+        launched, bad, wb, slot = self.run_ensure(lambda l: len(l) >= 1, ("brave.exe", False),
+                                                  remaining=[("edge.exe", False)])
+        self.assertEqual(launched, ["brave.exe"])          # same browser again, Edge never tried
+        bad.assert_called_once_with("profile-1")
+        wb.assert_not_called()
+        self.assertEqual(slot._launching_until, 0.0)
+
+    def test_retry_that_also_fails_falls_through_to_the_next_browser(self):
+        launched, bad, wb, _ = self.run_ensure(lambda l: False, ("brave.exe", False),
+                                               remaining=[("edge.exe", False)])
+        self.assertEqual(launched, ["brave.exe", "edge.exe"])
+        wb.assert_called_once_with("http://x/")
+
+    def test_normal_profile_launch_is_never_retried_or_marked(self):
+        launched, bad, _, _ = self.run_ensure(lambda l: False, ("brave.exe", True))
+        self.assertEqual(launched, [])
+        bad.assert_not_called()
+
+
 class OpenWindowTests(unittest.TestCase):
     def test_no_browser_uses_default_browser_tab(self):
         with mock.patch("webbrowser.open", return_value=True) as wb:

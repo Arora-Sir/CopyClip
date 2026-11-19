@@ -36,6 +36,9 @@ LAUNCH_SETTLE_S = 20.0
 #: How long we wait for a window to appear before trying the next browser.
 WINDOW_WAIT_S = 12.0
 POLL_S = 0.3
+#: A browser that has exited and still shows no window after this long has failed. A launcher that hands
+#: off to a running instance exits first and its window shows up a moment later, so exit alone is not failure.
+GONE_GRACE_S = 2.0
 
 CHROMIUM_EXES = {"msedge.exe": "edge", "chrome.exe": "chrome", "brave.exe": "brave",
                  "vivaldi.exe": "vivaldi", "opera.exe": "opera", "chromium.exe": "chromium"}
@@ -106,11 +109,55 @@ def browser_candidates(default_exe: str | None = None, exists=os.path.isfile) ->
     return out
 
 
-def profile_dir(exe: str | None = None) -> str:
-    """Private profile for the app window. One per browser, so two engines never share one."""
+def profile_dir(exe: str | None = None, slot: int = 0) -> str:
+    """Private profile for the app window. One set per browser, so two engines never share one.
+    Slot 0 keeps the original folder name, further slots get a "-2", "-3" suffix (see pick_profile)."""
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
     name = CHROMIUM_EXES.get(os.path.basename(exe or "").lower(), "browser")
+    if slot:
+        name = f"{name}-{slot + 1}"
     return os.path.join(base, "CopyClip", "ui-profile", name)
+
+
+#: After its window closes, a browser's main process on a profile can take 20 to 40 seconds to disappear
+#: (measured: even a forced kill took that long). A new launch on that profile hands off to the dying
+#: process and exits without a window. So each browser has a few private profiles, and a launch uses
+#: the first one whose last launched process has ended and that has not just failed.
+PROFILE_SLOTS = 4
+BAD_PROFILE_S = 120.0
+_PROFILE_PROCS: dict[str, subprocess.Popen] = {}
+_BAD_PROFILES: dict[str, float] = {}
+_PROFILE_LOCK = threading.Lock()
+
+
+def pick_profile(exe: str, *, clock=time.monotonic) -> str:
+    """The private profile to launch `exe` on. Falls back to slot 0 when every slot is busy or marked bad."""
+    with _PROFILE_LOCK:
+        now = clock()
+        for slot in range(PROFILE_SLOTS):
+            candidate = profile_dir(exe, slot)
+            last = _PROFILE_PROCS.get(candidate)
+            if last is not None and last.poll() is None:
+                continue
+            if _BAD_PROFILES.get(candidate, 0.0) > now:
+                continue
+            return candidate
+    return profile_dir(exe, 0)
+
+
+def _remember_launch(profile: str, proc) -> None:
+    """Remember the main process of a profile. A launcher that handed off and exited at once must not
+    replace the still-running process that owns the profile."""
+    with _PROFILE_LOCK:
+        last = _PROFILE_PROCS.get(profile)
+        if last is None or last.poll() is not None:
+            _PROFILE_PROCS[profile] = proc
+
+
+def mark_profile_bad(profile: str, *, clock=time.monotonic) -> None:
+    """A launch on this profile ended without a window, so something unseen still owns it."""
+    with _PROFILE_LOCK:
+        _BAD_PROFILES[profile] = clock() + BAD_PROFILE_S
 
 
 def prepare_profile(exe: str, directory: str) -> None:
@@ -300,11 +347,15 @@ def open_ui(server, route: str = "overview", *, flyout: bool = False) -> str:
 # ----------------------------------------------------------------------------- launching
 
 def _launch(exe: str, url: str, normal_profile: bool, size, position):
-    profile = None if normal_profile else profile_dir(exe)
+    profile = None if normal_profile else pick_profile(exe)
     if profile:
         prepare_profile(exe, profile)
-    return subprocess.Popen(edge_args(exe, url, user_data_dir=profile, size=size, position=position),
+    proc = subprocess.Popen(edge_args(exe, url, user_data_dir=profile, size=size, position=position),
                             close_fds=True)
+    if profile:
+        proc.copyclip_profile = profile
+        _remember_launch(profile, proc)
+    return proc
 
 
 def open_window(url: str, *, flyout: bool = False, candidates=None, slot: WindowSlot | None = None) -> bool:
@@ -327,7 +378,7 @@ def open_window(url: str, *, flyout: bool = False, candidates=None, slot: Window
         log.info("opening the CopyClip window with %s%s (pid %s)", os.path.basename(exe),
                  " (normal profile)" if normal else "", proc.pid)
         threading.Thread(target=_ensure_window, args=(proc, cands[i + 1:], url, flyout, size, position, slot),
-                         daemon=True, name="copyclip-launch-check").start()
+                         kwargs={"retry": (exe, normal)}, daemon=True, name="copyclip-launch-check").start()
         return True
     return webbrowser.open(url)
 
@@ -337,24 +388,46 @@ def _wait_for_window(proc, title: str, *, timeout_s: float = WINDOW_WAIT_S, slee
     """Wait until the window shows up. Returns "window", "alive" (still starting) or "gone"."""
     has = has_window or (lambda: window_exists(title))
     deadline = clock() + timeout_s
+    exited_at = None
     while True:
         if has():
             return "window"
-        if clock() >= deadline:
+        now = clock()
+        if now >= deadline:
             return "alive" if proc.poll() is None else "gone"
+        if exited_at is None and proc.poll() is not None:
+            exited_at = now
+        if exited_at is not None and now - exited_at >= GONE_GRACE_S:
+            return "gone"
         sleep(POLL_S)
 
 
 def _ensure_window(proc, remaining, url: str, flyout: bool, size, position,
-                   slot: WindowSlot | None = None, *, sleep=time.sleep, clock=time.monotonic,
+                   slot: WindowSlot | None = None, *, retry=None, sleep=time.sleep, clock=time.monotonic,
                    has_window=None) -> None:
     """Try the next browser only when this one produced no window. Never opens a second window
-    while the first is merely slow to start."""
+    while the first is merely slow to start. `retry` is the (exe, normal_profile) that was just launched:
+    when it exits without a window, its profile is marked bad (something still owns it) and it is started
+    once more on another private profile before any other browser is tried."""
     title = FLYOUT_TITLE if flyout else MAIN_TITLE
     try:
         state = _wait_for_window(proc, title, sleep=sleep, clock=clock, has_window=has_window)
         if state != "gone":
             return          # window is up, or the browser is still starting: leave it alone
+        if retry is not None and not retry[1]:
+            exe = retry[0]
+            failed = getattr(proc, "copyclip_profile", None)
+            if isinstance(failed, str):
+                mark_profile_bad(failed)
+            log.warning("%s exited without a window (its profile is probably still closing); "
+                        "starting it again on another private profile", os.path.basename(exe))
+            try:
+                proc = _launch(exe, url, False, size, position)
+            except OSError as exc:
+                log.error("could not restart %s: %s", os.path.basename(exe), exc)
+            else:
+                if _wait_for_window(proc, title, sleep=sleep, clock=clock, has_window=has_window) != "gone":
+                    return
         for exe, normal in remaining:
             log.warning("no window appeared; trying %s%s", os.path.basename(exe), " (normal profile)" if normal else "")
             try:

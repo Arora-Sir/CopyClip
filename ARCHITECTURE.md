@@ -1317,7 +1317,7 @@ Why it changed: the Tk dashboard ran inside the tray process and crashed it (six
 | `core/logsetup.py` | Rotating log plus `FoldingHandler`, which collapses repeated identical records |
 | `windows_app/service.py` | Every operation the UI can ask for, as plain methods with injected side effects (open folder, run adb, read clipboard, restart). Fully unit-tested without HTTP |
 | `windows_app/control_api.py` | A thin router over the service, plus the security rules (loopback, token, Host and Origin checks, fixed static files) |
-| `windows_app/launcher.py` | Finds a Chromium browser (the default one first, then Edge, Brave, Chrome) and opens the app window or tray flyout in a private per-browser profile. `WindowSlot` guarantees a single window: focus it if it exists, ignore requests while one is opening, move to the next browser only if none appeared. Also shows the native folder picker in a child process |
+| `windows_app/launcher.py` | Finds a Chromium browser (the default one first, then Edge, Brave, Chrome) and opens the app window or tray flyout in a private per-browser profile. `WindowSlot` guarantees a single window: focus it if it exists, ignore requests while one is opening, move to the next browser only if none appeared. Each browser rotates through four private profiles, because a closed window's browser can take 20 to 40 seconds to disappear and a new launch on its profile is swallowed. A browser that exits without a window is detected after 2 seconds, its profile is skipped for two minutes, and it is started once more on another profile before the next browser is tried (BUG-025). Also shows the native folder picker in a child process |
 | `windows_app/tray.py` | Win32 tray icon and menu. Every window launch is wrapped so a failure can never reach the message loop |
 
 ### How a setting change flows
@@ -1333,7 +1333,7 @@ Why it changed: the Tk dashboard ran inside the tray process and crashed it (six
 
 ### Still open
 
-The startup cost and memory of the app window have not been measured. On the one machine tested, Edge produced no window and Brave (the default browser) did, which is why the launcher prefers the default Chromium browser and escalates.
+The memory of the app window has not been measured. A cold open measured about 1 second with Brave and about 1 second with Chrome (2026-11-19). On the one machine tested, Edge produced no window and Brave (the default browser) did, which is why the launcher prefers the default Chromium browser and escalates.
 
 ## 13. Where to go for more
 

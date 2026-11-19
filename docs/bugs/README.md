@@ -32,6 +32,7 @@ in real use, not merely when a test passes.
 | [BUG-022](BUG-022-tray-click-opens-many-windows-and-white-focus-ring.md) | Tray click opened several windows, the window ran inside the daily browser, and a white focus ring framed the content | Medium | **FIXED IN CODE, verified on the maintainer's PC, OPEN until everyday use** |
 | [BUG-023](BUG-023-screenshot-resave-twin-and-silent-exits.md) | One screenshot arrived twice with different bytes, and the daemon could exit without a trace | Medium | **FIXED IN CODE, OPEN until live check on both devices** |
 | [BUG-024](BUG-024-logs-screen-scroll-jump-and-preview-clips.md) | Logs screen jumped on open, startup warning top right, small preview images synced as clips | Low | **FIXED IN CODE, OPEN until everyday use** |
+| [BUG-025](BUG-025-tray-window-takes-up-to-26-seconds-to-open.md) | Tray click sometimes needed 16 to 26 s to show the window: a lingering Brave process swallowed the launch and the launcher waited out a fixed 12 s per browser | Medium | **FIXED IN CODE with tests, OPEN until everyday use** |
 
 ## Companion files
 
